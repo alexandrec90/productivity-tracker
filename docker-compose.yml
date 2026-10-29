@@ -38,6 +38,10 @@ services:
       target: dev
     restart: unless-stopped
     env_file: .env
+    environment:
+      # `.env`'s DATABASE_URL is the host-side one (127.0.0.1 and the published port);
+      # inside the network the database is `db` on its own port.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-productivity_tra}:${POSTGRES_PASSWORD:-productivity_tra_local_dev}@db:5432/${POSTGRES_DB:-productivity_tracker}
     ports:
       - "${APP_HOST_PORT:-8003}:8000"
     volumes:
