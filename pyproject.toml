@@ -4,12 +4,25 @@ version = "0.1.0"
 description = "Track my productivity and idle time relative to claude."
 requires-python = ">=3.12"
 dependencies = [
-  "sqlalchemy>=2.0",
+  # `[asyncio]` brings greenlet, without which `sqlalchemy.ext.asyncio` will not import.
+  "sqlalchemy[asyncio]>=2.0",
   "psycopg[binary]>=3.2",
   # 1.17: `alembic.ini`'s ruff hooks are `type = module`, which arrived there.
   "alembic>=1.17",
   "pydantic-settings>=2.4",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  # The collector checks a session file's pid is still the process that wrote it, and
+  # the overlay walks a session's parent processes to the window hosting it.
+  "psutil>=6.0",
 ]
+
+[project.scripts]
+pt-collector = "productivity_tracker.collector:main"
+
+[project.gui-scripts]
+# A GUI entry point: on Windows it starts without a console window behind the overlay.
+pt-overlay = "productivity_tracker.overlay:main"
 
 [project.optional-dependencies]
 # Host-only toolchain. Deliberately NOT installed into the container image — it is
@@ -20,6 +33,9 @@ dev = [
   # 9.1: it applies `pythonpath` before loading `addopts`' `-p devkit_temproot`.
   "pytest>=9.1",
   "pytest-cov>=5.0",
+  # FastAPI's TestClient is built on it; Starlette deprecated plain `httpx` for it.
+  "httpx2>=2.16",
+  "types-psutil",
   # Runs `.pre-commit-config.yaml` — the commit-time gate. Installed here (not globally)
   # so the version is pinned with everything else, and so `session-start.sh` can wire the
   # git hook right after `uv sync` without a separate bootstrap step.

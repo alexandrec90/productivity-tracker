@@ -66,6 +66,12 @@ Add this project's specifics *below* — fixtures, isolation rules, markers, wha
 and where — but do not restate the policy above. It is vendored and drift-gated; a copy
 here is a fork that will disagree with it the first time either is edited.
 
+- The API, store and db tests need Postgres: `docker compose up -d db`. `tests/conftest.py`
+  creates and migrates a throwaway `<db>_test` beside `DATABASE_URL`'s database, never
+  touching the live one, and fails rather than skips without it.
+- The overlay window is tested through a stand-in for `tkinter`
+  (`tests/test_overlay_window.py`). CI has no display, so do not reach for a real `Tk()`.
+
 ## Guardrails
 
 Baseline guardrails — including the instruction-file feedback loop (**never silently

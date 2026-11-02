@@ -14,11 +14,21 @@ because guessing them wrong is worse than leaving them blank.
 - [ ] Replace the placeholder DB password in `.env` (the committed one is a
       local-dev placeholder and is fine to keep local, but never reuse it remotely)
 
-## First real work
+## Next
 
-- [ ] Replace the placeholder in `productivity_tracker/` with something that does the job
-- [ ] Delete `tests/test_smoke.py` once real tests exist
+- [ ] Start `pt-collector` at login on every PC (Task Scheduler or the Startup folder)
+- [ ] Idle time per project: busy and waiting time are now recorded per day across all
+      tasks (`daily_activity`); split them by task to report where agents sat idle
+- [ ] Gamification ideas not built yet: a daily prompt goal with a progress bar;
+      response time (how fast a yellow row is answered) with its own record;
+      achievements (first 100-prompt day, 5 agents at once); a weekly summary
 
 ## Archive
 
 <!-- Completed items move here. -->
+
+- [x] Scoreboard: prompts per task and per day, agent time, parallel peak, streaks and
+      records, and time agents waited on you
+
+- [x] Replace the placeholder in `productivity_tracker/`: collector, API, overlay
+- [x] Delete `tests/test_smoke.py` once real tests exist
