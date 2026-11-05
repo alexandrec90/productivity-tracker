@@ -3,10 +3,11 @@ today's prompts per task, and a scoreboard of today against your best day below.
 
 Run it on the PC you sit at (the laptop):
 
-    pt-overlay              # or: pythonw -m productivity_tracker.overlay
+    python -m productivity_tracker.autostart start overlay
 
 Left-click a row to focus one of its sessions; click again for the next one. Right-click
-toggles the task between active and inactive. Drag the header to move it.
+toggles the task between active and inactive. Drag the header to move it. The header's dash
+hides it to the tray icon, whose left-click brings it back.
 """
 
 import logging
@@ -24,6 +25,7 @@ from productivity_tracker.client import TrackerClient
 from productivity_tracker.config import Settings
 from productivity_tracker.focus import focus_session
 from productivity_tracker.status import Color, focus_order, next_session
+from productivity_tracker.tray import Command, start_tray
 
 log = logging.getLogger("productivity_tracker.overlay")
 
@@ -176,6 +178,7 @@ class OverlayWindow:
         model: OverlayModel,
         local_host: str,
         poll_seconds: float,
+        tray_commands: "queue.Queue[Command] | None" = None,
     ) -> None:
         self.root = root
         self.client = client
@@ -183,6 +186,8 @@ class OverlayWindow:
         self.local_host = local_host
         self.poll_seconds = poll_seconds
         self.states: queue.Queue[Mapping[str, Any] | None] = queue.Queue()
+        self.commands: queue.Queue[Command] = tray_commands or queue.Queue()
+        self.hidden = False
         self._signature: object = None
         self._board: Scoreboard | None = None
         self._drag = (0, 0)
@@ -201,6 +206,12 @@ class OverlayWindow:
         close = tk.Label(header, text="x", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda _e: root.destroy())
+        # Only with a tray icon: the window has no taskbar button, so nothing else could
+        # bring it back.
+        if tray_commands is not None:
+            hide = tk.Label(header, text="\N{EN DASH}", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
+            hide.pack(side="right")
+            hide.bind("<Button-1>", lambda _e: self.toggle_visible())
         for widget in (header, self.title):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
@@ -232,7 +243,21 @@ class OverlayWindow:
                 self.states.put(None)
             time.sleep(self.poll_seconds)
 
+    def toggle_visible(self) -> None:
+        if self.hidden:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+        else:
+            self.root.withdraw()
+        self.hidden = not self.hidden
+
     def _drain(self) -> None:
+        while not self.commands.empty():
+            if self.commands.get_nowait() is Command.QUIT:
+                # Nothing may be scheduled on a destroyed root, so no `after` below.
+                self.root.destroy()
+                return
+            self.toggle_visible()
         fresh, latest = False, None
         while not self.states.empty():
             fresh, latest = True, self.states.get_nowait()
@@ -403,14 +428,19 @@ def main() -> None:
     _dpi_aware()
     settings = Settings()
     root = tk.Tk()
+    commands: queue.Queue[Command] = queue.Queue()
+    tray = start_tray(commands, [PALETTE[c] for c in (Color.GREEN, Color.YELLOW, Color.RED)])
     OverlayWindow(
         root,
         TrackerClient(settings.tracker_url, settings.tracker_token),
         OverlayModel(),
         socket.gethostname(),
         settings.poll_interval_seconds,
+        commands if tray is not None else None,
     )
     root.mainloop()
+    if tray is not None:
+        tray.stop()
 
 
 if __name__ == "__main__":
