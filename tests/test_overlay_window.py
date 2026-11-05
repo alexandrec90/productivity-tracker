@@ -5,6 +5,7 @@ drawing: which rows are built in which colours, and what a click or a right-clic
 """
 
 import logging
+import queue
 from types import SimpleNamespace
 from typing import Any
 
@@ -261,6 +262,21 @@ def test_main_stops_the_tray_when_the_window_closes(threads, monkeypatch):
     assert stopped == [True]
 
 
+@pytest.mark.parametrize(
+    ("tray", "offered"), [(SimpleNamespace(stop=lambda: None), True), (None, False)]
+)
+def test_main_offers_to_hide_only_when_the_tray_started(threads, monkeypatch, tray, offered):
+    built: list[OverlayWindow] = []
+    real = overlay.OverlayWindow
+    monkeypatch.setattr(overlay, "OverlayWindow", lambda *a: built.append(real(*a)))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: tray)
+
+    overlay.main()
+
+    labels = [w.options.get("text") for w in header_labels(built[0].root)]
+    assert ("\N{EN DASH}" in labels) is offered
+
+
 class Root(Widget):
     def __init__(self) -> None:
         super().__init__()
@@ -292,7 +308,7 @@ def test_without_a_tray_nothing_offers_to_hide_the_window(threads):
 
 def test_the_dash_hides_the_window_when_there_is_a_tray(threads):
     root = Root()
-    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, can_hide=True)
+    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, queue.Queue())
     [hide] = [w for w in header_labels(root) if w.options.get("text") == "\N{EN DASH}"]
 
     hide.bindings["<Button-1>"](None)
@@ -303,12 +319,13 @@ def test_the_dash_hides_the_window_when_there_is_a_tray(threads):
 
 def test_the_tray_toggles_the_window_from_the_tk_thread(threads):
     root = Root()
-    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, can_hide=True)
+    commands: queue.Queue[Command] = queue.Queue()
+    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, commands)
 
-    win.commands.put(Command.TOGGLE)
+    commands.put(Command.TOGGLE)
     assert root.calls == []  # Queued, not called: the tray's thread may not touch Tk.
     win._drain()
-    win.commands.put(Command.TOGGLE)
+    commands.put(Command.TOGGLE)
     win._drain()
 
     assert root.calls == ["withdraw", "deiconify"]

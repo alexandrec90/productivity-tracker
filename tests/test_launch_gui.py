@@ -2,9 +2,8 @@
 
 import importlib.util
 import sys
-import uuid
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -67,11 +66,40 @@ def test_bad_arguments_start_nothing(launch, monkeypatch, argv):
         launch.main(argv)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="the mutex is a Windows object")
-def test_a_second_instance_is_refused(launch):
-    name = f"test-{uuid.uuid4()}"
-    assert launch.first_instance(name)
-    assert not launch.first_instance(name)
+@pytest.fixture
+def mutexes(launch: ModuleType, monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """`CreateMutexW`'s contract, held in a set: a second create of a name still succeeds,
+    and only the last error tells it apart. `WinDLL` exists on Windows alone, and CI is not
+    Windows, so every platform takes this stand-in and none of them skips."""
+    held: set[str] = set()
+    last_error = [0]
+
+    def create_mutex(attributes: None, initial_owner: bool, name: str) -> int:
+        last_error[0] = launch.ERROR_ALREADY_EXISTS if name in held else 0
+        held.add(name)
+        return 1
+
+    kernel32 = SimpleNamespace(CreateMutexW=create_mutex)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(launch.ctypes, "WinDLL", lambda *a, **k: kernel32, raising=False)
+    monkeypatch.setattr(launch.ctypes, "get_last_error", lambda: last_error[0], raising=False)
+    return held
+
+
+def test_a_second_instance_is_refused(launch, mutexes):
+    assert launch.first_instance("overlay")
+    assert not launch.first_instance("overlay")
+
+
+def test_the_overlay_and_the_collector_do_not_refuse_each_other(launch, mutexes):
+    assert launch.first_instance("overlay")
+    assert launch.first_instance("collector")
+
+
+def test_the_mutex_is_per_logon_session(launch, mutexes):
+    # `Global\` would let one user's overlay stop another's on a shared machine.
+    launch.first_instance("overlay")
+    assert mutexes == {"Local\\ProductivityTracker-overlay"}
 
 
 def test_every_instance_is_first_where_there_is_no_mutex(launch, monkeypatch):

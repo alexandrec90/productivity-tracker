@@ -178,8 +178,7 @@ class OverlayWindow:
         model: OverlayModel,
         local_host: str,
         poll_seconds: float,
-        commands: "queue.Queue[Command] | None" = None,
-        can_hide: bool = False,
+        tray_commands: "queue.Queue[Command] | None" = None,
     ) -> None:
         self.root = root
         self.client = client
@@ -187,7 +186,7 @@ class OverlayWindow:
         self.local_host = local_host
         self.poll_seconds = poll_seconds
         self.states: queue.Queue[Mapping[str, Any] | None] = queue.Queue()
-        self.commands: queue.Queue[Command] = commands or queue.Queue()
+        self.commands: queue.Queue[Command] = tray_commands or queue.Queue()
         self.hidden = False
         self._signature: object = None
         self._board: Scoreboard | None = None
@@ -209,7 +208,7 @@ class OverlayWindow:
         close.bind("<Button-1>", lambda _e: root.destroy())
         # Only with a tray icon: the window has no taskbar button, so nothing else could
         # bring it back.
-        if can_hide:
+        if tray_commands is not None:
             hide = tk.Label(header, text="\N{EN DASH}", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
             hide.pack(side="right")
             hide.bind("<Button-1>", lambda _e: self.toggle_visible())
@@ -437,8 +436,7 @@ def main() -> None:
         OverlayModel(),
         socket.gethostname(),
         settings.poll_interval_seconds,
-        commands,
-        tray is not None,
+        commands if tray is not None else None,
     )
     root.mainloop()
     if tray is not None:
