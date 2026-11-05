@@ -16,7 +16,8 @@ because guessing them wrong is worse than leaving them blank.
 
 ## Next
 
-- [ ] Start `pt-collector` at login on every PC (Task Scheduler or the Startup folder)
+- [ ] Enable the collector at login on every PC:
+      `python -m productivity_tracker.autostart enable collector`
 - [ ] Idle time per project: busy and waiting time are now recorded per day across all
       tasks (`daily_activity`); split them by task to report where agents sat idle
 - [ ] Gamification ideas not built yet: a daily prompt goal with a progress bar;

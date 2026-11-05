@@ -22,6 +22,7 @@ from productivity_tracker.overlay import (
     OverlayWindow,
 )
 from productivity_tracker.status import Color
+from productivity_tracker.tray import Command
 from test_overlay import (  # tests/ is on sys.path: pytest's rootdir-less "prepend" import
     STATE,
     stats,
@@ -247,5 +248,80 @@ def test_main_builds_the_window(threads, monkeypatch):
     built: list[OverlayWindow] = []
     real = overlay.OverlayWindow
     monkeypatch.setattr(overlay, "OverlayWindow", lambda *a: built.append(real(*a)))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: None)
     overlay.main()
     assert len(built) == 1
+
+
+def test_main_stops_the_tray_when_the_window_closes(threads, monkeypatch):
+    stopped: list[bool] = []
+    tray = SimpleNamespace(stop=lambda: stopped.append(True))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: tray)
+    overlay.main()
+    assert stopped == [True]
+
+
+class Root(Widget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+        self.scheduled = 0
+
+    def withdraw(self) -> None:
+        self.calls.append("withdraw")
+
+    def deiconify(self) -> None:
+        self.calls.append("deiconify")
+
+    def destroy(self) -> None:
+        self.calls.append("destroy")
+
+    def after(self, *args: Any) -> None:
+        self.scheduled += 1
+
+
+def header_labels(root):
+    return root.children[0].children
+
+
+def test_without_a_tray_nothing_offers_to_hide_the_window(threads):
+    root = Root()
+    OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0)
+    assert "\N{EN DASH}" not in [w.options.get("text") for w in header_labels(root)]
+
+
+def test_the_dash_hides_the_window_when_there_is_a_tray(threads):
+    root = Root()
+    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, can_hide=True)
+    [hide] = [w for w in header_labels(root) if w.options.get("text") == "\N{EN DASH}"]
+
+    hide.bindings["<Button-1>"](None)
+
+    assert root.calls == ["withdraw"]
+    assert win.hidden
+
+
+def test_the_tray_toggles_the_window_from_the_tk_thread(threads):
+    root = Root()
+    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0, can_hide=True)
+
+    win.commands.put(Command.TOGGLE)
+    assert root.calls == []  # Queued, not called: the tray's thread may not touch Tk.
+    win._drain()
+    win.commands.put(Command.TOGGLE)
+    win._drain()
+
+    assert root.calls == ["withdraw", "deiconify"]
+    assert not win.hidden
+
+
+def test_quit_destroys_the_root_and_schedules_nothing_on_it(threads):
+    root = Root()
+    win = OverlayWindow(root, Client(), OverlayModel(), "desk", 1.0)
+    before = root.scheduled
+
+    win.commands.put(Command.QUIT)
+    win._drain()
+
+    assert root.calls == ["destroy"]
+    assert root.scheduled == before

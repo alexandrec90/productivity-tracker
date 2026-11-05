@@ -15,6 +15,9 @@ dependencies = [
   # The collector checks a session file's pid is still the process that wrote it, and
   # the overlay walks a session's parent processes to the window hosting it.
   "psutil>=6.0",
+  # The overlay's tray icon. Windows only: the server image and CI have no use for them.
+  "pystray>=0.19; sys_platform == 'win32'",
+  "pillow>=11; sys_platform == 'win32'",
 ]
 
 [project.scripts]
@@ -71,3 +74,8 @@ disable_error_code = ["annotation-unchecked"]
 # and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
 # only produces errors this repo is not allowed to fix.
 exclude = '^scripts/(hooks/|sync-harness\.py)'
+
+# Windows-only dependencies, so absent from the Linux CI run that type-checks this.
+[[tool.mypy.overrides]]
+module = ["pystray", "PIL", "PIL.*"]
+ignore_missing_imports = true
