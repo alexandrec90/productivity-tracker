@@ -7,8 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
-from productivity_tracker.api import create_app, token_matches
+from productivity_tracker.api import create_app, task_out, token_matches
 from productivity_tracker.config import Settings
+from productivity_tracker.db import Task
+from productivity_tracker.status import Color
 
 
 def session(session_id: str, project: str = "alpha", status: str = "busy", **extra: Any):
@@ -298,3 +300,15 @@ def test_a_server_with_an_unknown_timezone_refuses_to_start(sync_db, test_databa
 )
 def test_token_matches(expected, header, ok):
     assert token_matches(expected, header) is ok
+
+
+@pytest.mark.parametrize(("active", "color"), [(True, Color.RED), (False, Color.GRAY)])
+def test_task_out_confirms_the_row_without_its_sessions(active, color):
+    out = task_out(Task(id=3, name="devkit", active=active))
+    assert (out.id, out.name, out.active, out.color, out.sessions) == (
+        3,
+        "devkit",
+        active,
+        color,
+        [],
+    )

@@ -5,6 +5,7 @@ drawing: which rows are built in which colours, and what a click or a right-clic
 """
 
 import logging
+import queue
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -18,10 +19,10 @@ from productivity_tracker.overlay import (
     ROW_BG,
     ROW_HOVER,
     TEXT,
-    OverlayModel,
     OverlayWindow,
 )
 from productivity_tracker.status import Color
+from productivity_tracker.tray import Command
 from test_overlay import (  # tests/ is on sys.path: pytest's rootdir-less "prepend" import
     STATE,
     stats,
@@ -141,7 +142,7 @@ def run_last(threads: Threads) -> None:
 
 # Unannotated, like the tests: the stand-ins are Tk and a TrackerClient only by duck type.
 def make(client):
-    return OverlayWindow(Widget(), client, OverlayModel(), "desk", 1.0)
+    return OverlayWindow(Widget(), client, "desk", 1.0)
 
 
 def shown(win, state):
@@ -270,7 +271,7 @@ def test_the_rdp_targets_reach_the_click(threads, monkeypatch):
         return "window"
 
     monkeypatch.setattr(overlay, "focus_session", focus)
-    win = OverlayWindow(Widget(), Client(), OverlayModel(), "desk", 1.0, {"desk": "10.0.0.1"})
+    win = OverlayWindow(Widget(), Client(), "desk", 1.0, rdp_targets={"desk": "10.0.0.1"})
     rows = shown(win, STATE)
 
     rows[0].bindings["<Button-1>"](None)
@@ -420,6 +421,126 @@ def test_polling_an_unreachable_server_queues_offline(threads, monkeypatch):
 def test_main_builds_the_window(threads, monkeypatch):
     built: list[OverlayWindow] = []
     real = overlay.OverlayWindow
-    monkeypatch.setattr(overlay, "OverlayWindow", lambda *a: built.append(real(*a)))
+    monkeypatch.setattr(overlay, "OverlayWindow", lambda *a, **k: built.append(real(*a, **k)))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: None)
     overlay.main()
     assert len(built) == 1
+
+
+def test_main_stops_the_tray_when_the_window_closes(threads, monkeypatch):
+    stopped: list[bool] = []
+    tray = SimpleNamespace(stop=lambda: stopped.append(True))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: tray)
+    overlay.main()
+    assert stopped == [True]
+
+
+@pytest.mark.parametrize(
+    ("tray", "offered"), [(SimpleNamespace(stop=lambda: None), True), (None, False)]
+)
+def test_main_offers_to_hide_only_when_the_tray_started(threads, monkeypatch, tray, offered):
+    built: list[OverlayWindow] = []
+    real = overlay.OverlayWindow
+    monkeypatch.setattr(overlay, "OverlayWindow", lambda *a, **k: built.append(real(*a, **k)))
+    monkeypatch.setattr(overlay, "start_tray", lambda commands, bars: tray)
+
+    overlay.main()
+
+    labels = [w.options.get("text") for w in header_labels(built[0].root)]
+    assert ("\N{EN DASH}" in labels) is offered
+
+
+class Root(Widget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+        self.scheduled = 0
+
+    def withdraw(self) -> None:
+        self.calls.append("withdraw")
+
+    def deiconify(self) -> None:
+        self.calls.append("deiconify")
+
+    def destroy(self) -> None:
+        self.calls.append("destroy")
+
+    def after(self, *args: Any) -> None:
+        self.scheduled += 1
+
+
+def header_labels(root):
+    return root.children[0].children
+
+
+def test_without_a_tray_nothing_offers_to_hide_the_window(threads):
+    root = Root()
+    OverlayWindow(root, Client(), "desk", 1.0)
+    assert "\N{EN DASH}" not in [w.options.get("text") for w in header_labels(root)]
+
+
+def test_the_dash_hides_the_window_when_there_is_a_tray(threads):
+    root = Root()
+    win = OverlayWindow(root, Client(), "desk", 1.0, tray_commands=queue.Queue())
+    [hide] = [w for w in header_labels(root) if w.options.get("text") == "\N{EN DASH}"]
+
+    hide.bindings["<Button-1>"](None)
+
+    assert root.calls == ["withdraw"]
+    assert win.hidden
+
+
+def test_the_tray_toggles_the_window_from_the_tk_thread(threads):
+    root = Root()
+    commands: queue.Queue[Command] = queue.Queue()
+    win = OverlayWindow(root, Client(), "desk", 1.0, tray_commands=commands)
+
+    commands.put(Command.TOGGLE)
+    assert root.calls == []  # Queued, not called: the tray's thread may not touch Tk.
+    win._drain()
+    commands.put(Command.TOGGLE)
+    win._drain()
+
+    assert root.calls == ["withdraw", "deiconify"]
+    assert not win.hidden
+
+
+def test_quit_destroys_the_root_and_schedules_nothing_on_it(threads):
+    root = Root()
+    win = OverlayWindow(root, Client(), "desk", 1.0)
+    before = root.scheduled
+
+    win.commands.put(Command.QUIT)
+    win._drain()
+
+    assert root.calls == ["destroy"]
+    assert root.scheduled == before
+
+
+class Placed(Widget):
+    """A window sitting at (100, 50) that remembers where it is moved to."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.moves: list[str] = []
+
+    def winfo_x(self) -> int:
+        return 100
+
+    def winfo_y(self) -> int:
+        return 50
+
+    def geometry(self, spec: str) -> None:
+        self.moves.append(spec)
+
+
+@pytest.mark.parametrize("on_title", [False, True])
+def test_dragging_the_header_moves_the_window_by_as_much(threads, on_title):
+    root = Placed()
+    win = OverlayWindow(root, Client(), "desk", 1.0)
+    grabbed = win.title if on_title else root.children[0]
+
+    grabbed.bindings["<ButtonPress-1>"](SimpleNamespace(x_root=110, y_root=55))
+    grabbed.bindings["<B1-Motion>"](SimpleNamespace(x_root=210, y_root=155))
+
+    assert root.moves == ["+200+150"]

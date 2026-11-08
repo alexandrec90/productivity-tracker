@@ -69,6 +69,10 @@ you connect by address and keep several open, say which is which in the laptop's
 `TRACKER_RDP_TARGETS={"DESKTOP-B9FC8VP": "100.76.121.58"}`. Only `mstsc` windows are
 recognised, and two tabs with the same title cannot be told apart: the first one wins.
 
+The `–` in the header hides the overlay to its tray icon, near the clock (Windows may tuck
+it behind the `^`). Left-click the icon to show or hide it; right-click it for **Start at
+login** and **Quit**. The `x` quits too.
+
 ### Scoreboard
 
 Each row shows the prompts you typed on that task today, and below the rows a scoreboard
@@ -99,9 +103,25 @@ Agent time and parallel count from the day the collector starts. Days end at mid
    running, as long as you do not sign out and the PC does not sleep.
 2. **Every PC** (including the server's and the laptop): clone, `uv sync`, and put
    `TRACKER_URL` (the server's address as this PC sees it, e.g.
-   `http://desktop-b9fc8vp:8003`) and the same `TRACKER_TOKEN` in `.env`. Run
-   `uv run pt-collector`, or have it start at login.
-3. **The laptop**: `uv run pt-overlay` (a GUI entry point, so no console window).
+   `http://desktop-b9fc8vp:8003`) and the same `TRACKER_TOKEN` in `.env`. Then have the
+   collector start at login, and start it now:
+   `.venv\Scripts\python -m productivity_tracker.autostart enable collector`, then the
+   same with `start collector`.
+3. **The laptop**: the same for the overlay: `enable overlay`, then `start overlay`.
+
+`autostart` writes a value under your user's `Run` key, so it needs no admin rights, and
+`disable` or Windows' Startup apps list turns it off. Logs go to `logs/overlay.log` and
+`logs/collector.log`. Run `enable` from the main clone: it refuses a git worktree, which
+gets cleaned up. Starting something already running does nothing.
+
+`disable` stops the next login's start, not a running process. The tray's Quit stops the
+overlay; the collector has no window, so stop it from Task Manager (a `pythonw.exe`) or with
+`Get-CimInstance Win32_Process | ? CommandLine -like '*launch_gui.py*collector*' |
+% { Stop-Process -Id $_.ProcessId }`.
+
+Avoid `pt-overlay.exe` on a venv built by uv 0.11.29: its `pythonw.exe` is a console program,
+so that opens a terminal, and closing the terminal kills the overlay.
+`scripts/launch_gui.py`, which `autostart` runs, does not depend on it.
 
 ## Development
 

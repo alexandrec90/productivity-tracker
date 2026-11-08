@@ -16,7 +16,8 @@ because guessing them wrong is worse than leaving them blank.
 
 ## Next
 
-- [ ] Start `pt-collector` at login on every PC (Task Scheduler or the Startup folder)
+- [ ] Enable the collector at login on every PC:
+      `python -m productivity_tracker.autostart enable collector`
 - [ ] itopia: its row exists but stays grey until a collector reports. itopia is off the
       tailnet, so it needs a route to the server first; then `TRACKER_TASK=itopia` there
 - [ ] Codex sessions: the collector reads Claude Code's files only. Codex keeps no live

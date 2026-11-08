@@ -1,12 +1,21 @@
 """Which tab is a session's, on real titles, spinner and all. Reading a console title and
-selecting a tab need a live terminal, so only the decisions around them are tested here."""
+selecting a tab need a live terminal, so only the decisions around them are tested here,
+with UI Automation stood in for."""
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from productivity_tracker import terminal_tab
-from productivity_tracker.terminal_tab import console_title, main, pick_tab, run, tab_key
+from productivity_tracker.terminal_tab import (
+    console_title,
+    main,
+    pick_tab,
+    run,
+    select_tab,
+    tab_key,
+)
 
 
 @pytest.mark.parametrize(
@@ -80,3 +89,64 @@ def test_main_exits_nonzero_when_there_is_no_tab(monkeypatch, capsys):
 def test_console_title_off_windows_is_empty(monkeypatch):
     monkeypatch.setattr(terminal_tab.sys, "platform", "linux")
     assert console_title(1) == ""
+
+
+class Tab:
+    """A UI Automation tab element: a name, and a selection pattern that records `Select`."""
+
+    def __init__(self, name: str, selected: list[str]) -> None:
+        self.CurrentName = name
+        self._selected = selected
+
+    def GetCurrentPattern(self, pattern_id):
+        assert pattern_id == NAMES.UIA_SelectionItemPatternId
+        return SimpleNamespace(QueryInterface=lambda iface: self)
+
+    def Select(self) -> None:
+        self._selected.append(self.CurrentName)
+
+
+NAMES = SimpleNamespace(
+    CUIAutomation=SimpleNamespace(_reg_clsid_="clsid"),
+    IUIAutomation="IUIAutomation",
+    IUIAutomationSelectionItemPattern="IUIAutomationSelectionItemPattern",
+    UIA_ControlTypePropertyId=1,
+    UIA_TabItemControlTypeId=2,
+    TreeScope_Descendants=4,
+    UIA_SelectionItemPatternId=5,
+)
+
+
+def fake_comtypes(monkeypatch, windows: dict[int, list[str]]) -> list[str]:
+    """Stand in for comtypes, whose UI Automation needs a live Windows Terminal; returns
+    the names of the tabs `select_tab` selects."""
+    selected: list[str] = []
+
+    def found(hwnd: int) -> SimpleNamespace:
+        tabs = [Tab(name, selected) for name in windows[hwnd]]
+        return SimpleNamespace(Length=len(tabs), GetElement=tabs.__getitem__)
+
+    automation = SimpleNamespace(
+        ElementFromHandle=lambda hwnd: SimpleNamespace(FindAll=lambda scope, cond: found(hwnd)),
+        CreatePropertyCondition=lambda prop, value: (prop, value),
+    )
+    client = SimpleNamespace(
+        GetModule=lambda dll: None, CreateObject=lambda clsid, interface: automation
+    )
+    modules = {"comtypes.client": client, "comtypes.gen.UIAutomationClient": NAMES}
+    monkeypatch.setattr(terminal_tab.importlib, "import_module", modules.__getitem__)
+    return selected
+
+
+def test_select_tab_selects_it_in_the_window_that_holds_it(monkeypatch):
+    selected = fake_comtypes(
+        monkeypatch, {5: ["other"], 6: ["pwsh", "\N{EIGHT SPOKED ASTERISK} job"]}
+    )
+    assert select_tab([5, 6], "\N{CIRCLE WITH LEFT HALF BLACK} job") == 6
+    assert selected == ["\N{EIGHT SPOKED ASTERISK} job"]
+
+
+def test_select_tab_with_no_such_tab_selects_nothing(monkeypatch):
+    selected = fake_comtypes(monkeypatch, {5: ["other"]})
+    assert select_tab([5], "job") is None
+    assert selected == []

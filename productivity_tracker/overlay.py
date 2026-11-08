@@ -3,11 +3,12 @@ today's prompts per task, and a scoreboard of today against your best day below.
 
 Run it on the PC you sit at (the laptop):
 
-    pt-overlay              # or: pythonw -m productivity_tracker.overlay
+    python -m productivity_tracker.autostart start overlay
 
 Left-click a row to focus one of its sessions; click again for the next one. Right-click a
 row for its menu: set it active or inactive, or remove it. The header's plus adds a row.
-Drag the header to move it.
+Drag the header to move it. The header's dash hides it to the tray icon, whose left-click
+brings it back.
 """
 
 import logging
@@ -26,6 +27,7 @@ from productivity_tracker.client import TrackerClient
 from productivity_tracker.config import Settings
 from productivity_tracker.focus import focus_session
 from productivity_tracker.status import Color, focus_order, next_session
+from productivity_tracker.tray import Command, start_tray
 
 log = logging.getLogger("productivity_tracker.overlay")
 
@@ -181,21 +183,23 @@ class OverlayWindow:
         self,
         root: tk.Tk,
         client: TrackerClient,
-        model: OverlayModel,
         local_host: str,
         poll_seconds: float,
+        *,
         rdp_targets: Mapping[str, str] | None = None,
+        tray_commands: "queue.Queue[Command] | None" = None,
     ) -> None:
         self.root = root
         self.client = client
-        self.model = model
+        self.model = OverlayModel()
         self.local_host = local_host
         self.poll_seconds = poll_seconds
         self.rdp_targets = rdp_targets
         self.states: queue.Queue[Mapping[str, Any] | None] = queue.Queue()
+        self.commands: queue.Queue[Command] = tray_commands or queue.Queue()
+        self.hidden = False
         self._signature: object = None
         self._board: Scoreboard | None = None
-        self._drag = (0, 0)
         self._placed = False
 
         root.title("Agents")
@@ -214,9 +218,13 @@ class OverlayWindow:
         add = tk.Label(header, text="+", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
         add.pack(side="right")
         add.bind("<Button-1>", lambda _e: self.on_add())
-        for widget in (header, self.title):
-            widget.bind("<ButtonPress-1>", self._start_drag)
-            widget.bind("<B1-Motion>", self._on_drag)
+        # Only with a tray icon: the window has no taskbar button, so nothing else could
+        # bring it back.
+        if tray_commands is not None:
+            hide = tk.Label(header, text="\N{EN DASH}", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
+            hide.pack(side="right")
+            hide.bind("<Button-1>", lambda _e: self.toggle_visible())
+        _draggable(root, (header, self.title))
 
         # Column captions, laid out like a row so they line up with the numbers below.
         captions = tk.Frame(root, bg=BG)
@@ -245,7 +253,21 @@ class OverlayWindow:
                 self.states.put(None)
             time.sleep(self.poll_seconds)
 
+    def toggle_visible(self) -> None:
+        if self.hidden:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+        else:
+            self.root.withdraw()
+        self.hidden = not self.hidden
+
     def _drain(self) -> None:
+        while not self.commands.empty():
+            if self.commands.get_nowait() is Command.QUIT:
+                # Nothing may be scheduled on a destroyed root, so no `after` below.
+                self.root.destroy()
+                return
+            self.toggle_visible()
         fresh, latest = False, None
         while not self.states.empty():
             fresh, latest = True, self.states.get_nowait()
@@ -428,12 +450,20 @@ class OverlayWindow:
         self.root.geometry(f"+{x}+48")
         self._placed = True
 
-    def _start_drag(self, event: tk.Event) -> None:
-        self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
 
-    def _on_drag(self, event: tk.Event) -> None:
-        dx, dy = self._drag
-        self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+def _draggable(root: tk.Tk, handles: tuple[tk.Misc, ...]) -> None:
+    """Pressing on any of `handles` and moving drags the whole window."""
+    grip = [0, 0]
+
+    def start(event: tk.Event) -> None:
+        grip[:] = [event.x_root - root.winfo_x(), event.y_root - root.winfo_y()]
+
+    def move(event: tk.Event) -> None:
+        root.geometry(f"+{event.x_root - grip[0]}+{event.y_root - grip[1]}")
+
+    for handle in handles:
+        handle.bind("<ButtonPress-1>", start)
+        handle.bind("<B1-Motion>", move)
 
 
 def _shade(widgets: tuple[tk.Misc, ...], color: str) -> None:
@@ -458,15 +488,19 @@ def main() -> None:
     _dpi_aware()
     settings = Settings()
     root = tk.Tk()
+    commands: queue.Queue[Command] = queue.Queue()
+    tray = start_tray(commands, [PALETTE[c] for c in (Color.GREEN, Color.YELLOW, Color.RED)])
     OverlayWindow(
         root,
         TrackerClient(settings.tracker_url, settings.tracker_token),
-        OverlayModel(),
         socket.gethostname(),
         settings.poll_interval_seconds,
-        settings.tracker_rdp_targets,
+        rdp_targets=settings.tracker_rdp_targets,
+        tray_commands=commands if tray is not None else None,
     )
     root.mainloop()
+    if tray is not None:
+        tray.stop()
 
 
 if __name__ == "__main__":

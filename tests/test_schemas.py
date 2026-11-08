@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from productivity_tracker.schemas import (
     ActiveIn,
     DayStats,
+    FocusIn,
+    FocusOut,
     PromptIn,
     Records,
     SessionIn,
@@ -13,6 +15,7 @@ from productivity_tracker.schemas import (
     SnapshotIn,
     StateOut,
     StatsOut,
+    TaskIn,
     TaskOut,
 )
 from productivity_tracker.status import Color
@@ -114,3 +117,28 @@ def test_active_in():
     assert ActiveIn.model_validate({"active": False}).active is False
     with pytest.raises(ValidationError):
         ActiveIn.model_validate({})
+
+
+def test_task_in_trims_the_name():
+    assert TaskIn.model_validate({"name": "  devkit \t"}).name == "devkit"
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * 201])
+def test_task_in_refuses_a_name_no_row_could_carry(name):
+    with pytest.raises(ValidationError):
+        TaskIn.model_validate({"name": name})
+
+
+def test_focus_in():
+    assert FocusIn.model_validate({"host": "DESK", "pid": 42}) == FocusIn(host="DESK", pid=42)
+    with pytest.raises(ValidationError):
+        FocusIn.model_validate({"host": "", "pid": 42})
+    with pytest.raises(ValidationError):
+        FocusIn.model_validate({"host": "DESK"})
+
+
+def test_focus_out_is_none_when_nothing_was_clicked():
+    assert FocusOut.model_validate({"pid": None}).pid is None
+    assert FocusOut.model_validate({"pid": 7}).pid == 7
+    with pytest.raises(ValidationError):
+        FocusOut.model_validate({})
