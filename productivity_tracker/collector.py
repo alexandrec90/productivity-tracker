@@ -5,22 +5,34 @@ a PC that stops reporting goes stale on the server instead of staying green. It 
 any prompts typed since the last report (their time and project, never their text), which
 the server turns into daily counts, records and streaks.
 
+It is also the overlay's hand on this PC: a click on one of this PC's sessions reaches it
+through the server, and it brings that session's terminal forward. That only works from
+inside the desktop you see, so start it at login, not as a service.
+
     pt-collector            # or: python -m productivity_tracker.collector
 """
 
 import logging
 import socket
+import threading
 import time
 import urllib.error
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from typing import Any
 
 from productivity_tracker.client import TrackerClient
 from productivity_tracker.config import Settings
+from productivity_tracker.focus import focus_local
 from productivity_tracker.prompts import Prompt, PromptFeed
 from productivity_tracker.sessions import LiveSession, claude_config_dir, read_sessions
 
 log = logging.getLogger("productivity_tracker.collector")
+
+# A click often comes just as its Remote Desktop window reconnects, and a disconnected
+# desktop has no foreground to take, so it is tried for about this long.
+FOCUS_ATTEMPTS = 15
+FOCUS_RETRY_SECONDS = 1.0
 
 
 def build_snapshot(
@@ -47,14 +59,54 @@ def prompt_feed(settings: Settings) -> PromptFeed:
 def collect_once(settings: Settings, client: TrackerClient, host: str, feed: PromptFeed) -> int:
     """One report: the live sessions, and the prompts the server has not had yet. Those count
     as delivered only once the post succeeds."""
-    sessions = read_sessions(claude_config_dir(settings.claude_config_dir) / "sessions")
-    sessions = assign_task(sessions, settings.tracker_task)
     prompts = feed.pending()
+    sessions = [
+        s
+        for s in read_sessions(claude_config_dir(settings.claude_config_dir) / "sessions")
+        if s.session_id not in feed.dispatched_sessions
+    ]
+    sessions = assign_task(sessions, settings.tracker_task)
     client.post_snapshot(
         build_snapshot(host, sessions, assign_task(prompts, settings.tracker_task))
     )
     feed.delivered(prompts)
     return len(sessions)
+
+
+def focus_with_retries(
+    pid: int,
+    focus: Callable[[int], bool] = focus_local,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    for attempt in range(FOCUS_ATTEMPTS):
+        if attempt:
+            sleep(FOCUS_RETRY_SECONDS)
+        if focus(pid):
+            return True
+    log.warning("no window could be raised for pid %s", pid)
+    return False
+
+
+def serve_focus_once(
+    client: TrackerClient,
+    host: str,
+    focus: Callable[[int], bool] = focus_with_retries,
+) -> None:
+    """Wait for one click on this PC's sessions, and carry it out."""
+    pid = client.next_focus(host)
+    if pid is not None:
+        focus(pid)
+
+
+def serve_focus(client: TrackerClient, host: str, retry_seconds: float) -> None:
+    """Carry out clicks for as long as the collector runs. On a thread of its own: the wait
+    lasts until the next click, and the reports cannot."""
+    while True:
+        try:
+            serve_focus_once(client, host)
+        except (urllib.error.URLError, OSError, ValueError):
+            # The report loop already says when the server is unreachable.
+            time.sleep(retry_seconds)
 
 
 def main() -> None:
@@ -69,6 +121,11 @@ def main() -> None:
         settings.tracker_url,
         f" as task {settings.tracker_task!r}" if settings.tracker_task else "",
     )
+    threading.Thread(
+        target=serve_focus,
+        args=(client, host, settings.collect_interval_seconds),
+        daemon=True,
+    ).start()
     reachable = True
     while True:
         try:

@@ -1,9 +1,14 @@
-"""The prompts you typed, read from Claude Code's prompt history (`history.jsonl`).
+"""The prompts sent to agents, read from Claude Code's prompt history (`history.jsonl`).
 
 Claude Code appends one line per prompt, with its time, its session and the directory it was
 typed in, whether it was typed in the terminal or sent through Remote Control. Only those three
 leave this PC: the prompt's text never does. Slash commands (`/clear`) and shell escapes
 (`!ls`) are not prompts to an agent, so they are left out.
+
+History records no author, and neither does the transcript, which says a scheduled fixer's
+brief was `typed` by a `human`: to Claude Code it was. All that gives one away is its text, so
+that opening sentence is read here, and only the verdict leaves this PC. A session opened
+with such a brief is a dispatched session, and is no agent of yours either.
 """
 
 import json
@@ -16,6 +21,8 @@ from pathlib import Path
 from productivity_tracker.sessions import project_name
 
 _NOT_PROMPTS = ("/", "!")
+# How a program's brief opens: devkit's fix pass, `ROLE` in its `fix_prompts.py`.
+_DISPATCHED = ("You are a fixer session",)
 
 
 @dataclass(frozen=True)
@@ -23,6 +30,7 @@ class Prompt:
     session_id: str
     at: str  # ISO 8601, UTC
     project: str
+    dispatched: bool = False
 
 
 def parse_prompt(raw: object, project_of: Callable[[str], str] = project_name) -> Prompt | None:
@@ -43,6 +51,7 @@ def parse_prompt(raw: object, project_of: Callable[[str], str] = project_name) -
         session_id=session_id if isinstance(session_id, str) else "",
         at=datetime.fromtimestamp(timestamp / 1000, tz=UTC).isoformat(),
         project=project_of(project),
+        dispatched=text.startswith(_DISPATCHED),
     )
 
 
@@ -88,16 +97,15 @@ class PromptFeed:
         self._sent: set[tuple[str, str]] = set()
         # The same few directories recur thousands of times, and each lookup walks the disk.
         self._project_of = cache(project_name)
+        self.dispatched_sessions: set[str] = set()
 
     def pending(self) -> list[Prompt]:
         signature = _signature(self.path)
         if signature != self._signature:
             self._signature = signature
-            self._unsent = [
-                p
-                for p in read_prompts(self.path, self._project_of)
-                if (p.session_id, p.at) not in self._sent
-            ]
+            prompts = read_prompts(self.path, self._project_of)
+            self.dispatched_sessions = {p.session_id for p in prompts if p.dispatched}
+            self._unsent = [p for p in prompts if (p.session_id, p.at) not in self._sent]
         return self._unsent[: self.batch]
 
     def delivered(self, prompts: list[Prompt]) -> None:

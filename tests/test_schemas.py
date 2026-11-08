@@ -22,8 +22,14 @@ MINIMAL = {"session_id": "s1", "pid": 1, "project": "alpha", "cwd": "/code/alpha
 
 def test_a_minimal_session_parses_with_its_optional_fields_empty():
     session = SessionIn.model_validate(MINIMAL)
-    assert session.remote_session_id is None
+    assert session.waiting_for is None
     assert session.status_updated_at is None
+
+
+def test_a_session_from_an_older_collector_still_parses():
+    # Collectors outlive a server upgrade until each PC restarts one.
+    session = SessionIn.model_validate({**MINIMAL, "remote_session_id": "session_1"})
+    assert session.session_id == "s1"
 
 
 @pytest.mark.parametrize(
@@ -60,7 +66,6 @@ def test_the_state_serialises_colours_as_their_names():
                         waiting_for="input needed",
                         name=None,
                         kind=None,
-                        remote_session_id="session_1",
                         status_updated_at=None,
                     )
                 ],

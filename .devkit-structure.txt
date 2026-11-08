@@ -16,6 +16,7 @@
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
 dependency::pyproject.toml::alembic = 1
+dependency::pyproject.toml::comtypes = 1
 dependency::pyproject.toml::fastapi = 1
 dependency::pyproject.toml::httpx2 = 1
 dependency::pyproject.toml::mypy = 1

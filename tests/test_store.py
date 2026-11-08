@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from productivity_tracker.db import make_engine
 from productivity_tracker.schemas import DayStats, PromptIn, Records, SessionIn, SnapshotIn
 from productivity_tracker.store import (
+    add_task,
     check_timezone,
     ingest_snapshot,
     load_state,
     load_stats,
     local_date,
+    remove_task,
     set_active,
 )
 
@@ -52,7 +54,13 @@ def snap(host: str, sessions: list[SessionIn], prompts: list[PromptIn] | None = 
     return SnapshotIn(host=host, sessions=sessions, prompts=prompts or [])
 
 
+def listed(run, *names: str) -> None:
+    for name in names:
+        run(lambda db, name=name: add_task(db, name))
+
+
 def test_sessions_count_until_their_host_goes_stale(run):
+    listed(run, "alpha")
     run(lambda db: ingest_snapshot(db, snap("desk", [sin("s1")]), T0))
 
     fresh = run(lambda db: load_state(db, T0 + timedelta(seconds=29), STALE))
@@ -65,11 +73,7 @@ def test_sessions_count_until_their_host_goes_stale(run):
 
 
 def test_active_tasks_come_first_then_by_name_ignoring_case(run):
-    run(
-        lambda db: ingest_snapshot(
-            db, snap("desk", [sin("1", "beta"), sin("2", "Alpha"), sin("3", "zeta")]), T0
-        )
-    )
+    listed(run, "beta", "Alpha", "zeta")
     state = run(lambda db: load_state(db, T0, STALE))
     zeta = next(t for t in state.tasks if t.name == "zeta")
     run(lambda db: set_active(db, zeta.id, False))
@@ -78,7 +82,8 @@ def test_active_tasks_come_first_then_by_name_ignoring_case(run):
     assert names == ["Alpha", "beta", "zeta"]
 
 
-def test_a_task_seen_again_is_not_duplicated(run):
+def test_sessions_on_two_pcs_share_one_row(run):
+    listed(run, "alpha")
     run(lambda db: ingest_snapshot(db, snap("desk", [sin("s1")]), T0))
     run(lambda db: ingest_snapshot(db, snap("laptop", [sin("s2")]), T0))
 
@@ -87,8 +92,28 @@ def test_a_task_seen_again_is_not_duplicated(run):
     assert len(state.tasks[0].sessions) == 2
 
 
-def test_set_active(run):
+def test_a_session_of_an_unlisted_project_makes_no_row_but_still_counts(run):
+    ingest(run, "desk", [sin("s1", "vs-code")], at(0))
+    ingest(run, "desk", [sin("s1", "vs-code")], at(3))
+
+    state = run(lambda db: load_state(db, at(3), STALE))
+    assert state.tasks == []
+    assert state.stats.today.busy_seconds == 3.0
+    assert state.stats.today.peak_busy == 1
+
+
+def test_a_removed_row_is_gone_and_a_second_removal_says_so(run):
+    listed(run, "alpha")
     run(lambda db: ingest_snapshot(db, snap("desk", [sin("s1")]), T0))
+    task_id = run(lambda db: load_state(db, T0, STALE)).tasks[0].id
+
+    assert run(lambda db: remove_task(db, task_id)) is True
+    assert run(lambda db: remove_task(db, task_id)) is False
+    assert run(lambda db: load_state(db, T0, STALE)).tasks == []
+
+
+def test_set_active(run):
+    listed(run, "alpha")
     task_id = run(lambda db: load_state(db, T0, STALE)).tasks[0].id
 
     task = run(lambda db: set_active(db, task_id, False))
@@ -157,6 +182,7 @@ def test_prompts_count_once_per_task_and_day(run):
         PromptIn(session_id="s1", at=at(-30), project="alpha"),
         PromptIn(session_id="s2", at=at(-10), project="itopia"),
     ]
+    listed(run, "alpha")
     ingest(run, "desk", [sin("s1")], T0, prompts=prompts)
     # Sent again after a collector restart: not counted twice.
     ingest(run, "desk", [sin("s1")], at(1), prompts=prompts[:2])
@@ -164,6 +190,30 @@ def test_prompts_count_once_per_task_and_day(run):
     state = run(lambda db: load_state(db, at(1), STALE))
     assert {t.name: t.prompts_today for t in state.tasks} == {"alpha": 2}
     assert state.stats.today.prompts == 3
+
+
+def test_dispatched_prompts_touch_no_count_record_or_streak(run):
+    def sent(days_ago: int, n: int, dispatched: bool) -> list[PromptIn]:
+        moment = T0 - timedelta(days=days_ago)
+        return [
+            PromptIn(
+                session_id="s" + str(dispatched),
+                at=moment + timedelta(seconds=i),
+                project="alpha",
+                dispatched=dispatched,
+            )
+            for i in range(n)
+        ]
+
+    listed(run, "alpha")
+    # Yesterday was all fixers, ten of them; today you typed two and a fixer sent ten.
+    ingest(run, "desk", [], T0, prompts=sent(1, 10, True) + sent(0, 2, False) + sent(0, 10, True))
+
+    state = run(lambda db: load_state(db, T0, STALE))
+    assert state.tasks[0].prompts_today == 2
+    assert state.stats.today.prompts == 2
+    assert state.stats.best.prompts == 0
+    assert (state.stats.streak, state.stats.best_streak) == (1, 1)
 
 
 def test_the_day_turns_over_at_midnight_in_the_configured_zone(run):

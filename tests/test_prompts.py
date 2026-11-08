@@ -29,6 +29,34 @@ def test_a_prompt_keeps_when_and_where_but_not_what():
     assert prompt == Prompt(session_id="s1", at="2026-10-28T12:00:00+00:00", project="alpha")
 
 
+def test_a_fixers_brief_is_marked_as_a_programs():
+    brief = "You are a fixer session, dispatched by the fix pass. Read .claude/fixer.md first"
+    prompt = parse_prompt(line(brief), by_name)
+    assert prompt is not None
+    assert prompt.dispatched is True
+
+
+@pytest.mark.parametrize("display", ["fix the bug", "are you a fixer session?"])
+def test_a_prompt_you_typed_is_yours(display):
+    prompt = parse_prompt(line(display), by_name)
+    assert prompt is not None
+    assert prompt.dispatched is False
+
+
+def test_the_feed_knows_which_sessions_a_program_opened(tmp_path):
+    path = tmp_path / "history.jsonl"
+    write(
+        path,
+        line("You are a fixer session, dispatched by the fix pass.", session="fixer"),
+        line("go", NOON_MS + 1, session="mine"),
+    )
+    feed = PromptFeed(path)
+
+    feed.pending()
+
+    assert feed.dispatched_sessions == {"fixer"}
+
+
 def test_the_project_is_the_sessions_project(tmp_path):
     # The default lookup folds a worktree into its repository, as for sessions.
     raw = line(project=str(tmp_path / "alpha" / ".claude" / "worktrees" / "w1"))

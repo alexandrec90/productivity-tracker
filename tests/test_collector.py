@@ -4,7 +4,16 @@ import logging
 import pytest
 
 from productivity_tracker import collector
-from productivity_tracker.collector import assign_task, build_snapshot, collect_once, prompt_feed
+from productivity_tracker.collector import (
+    FOCUS_ATTEMPTS,
+    assign_task,
+    build_snapshot,
+    collect_once,
+    focus_with_retries,
+    prompt_feed,
+    serve_focus,
+    serve_focus_once,
+)
 from productivity_tracker.config import Settings
 from productivity_tracker.prompts import Prompt
 from productivity_tracker.sessions import LiveSession
@@ -20,7 +29,6 @@ def live(session_id: str = "s1") -> LiveSession:
         waiting_for=None,
         name=None,
         kind="interactive",
-        remote_session_id="session_x",
         status_updated_at=None,
     )
 
@@ -38,7 +46,6 @@ def test_build_snapshot_is_the_apis_body():
                 "waiting_for": None,
                 "name": None,
                 "kind": "interactive",
-                "remote_session_id": "session_x",
                 "status_updated_at": None,
             }
         ],
@@ -49,7 +56,12 @@ def test_build_snapshot_is_the_apis_body():
 def test_build_snapshot_carries_the_prompts():
     prompt = Prompt(session_id="s1", at="2026-10-28T12:00:00+00:00", project="alpha")
     assert build_snapshot("desk", [], [prompt])["prompts"] == [
-        {"session_id": "s1", "at": "2026-10-28T12:00:00+00:00", "project": "alpha"}
+        {
+            "session_id": "s1",
+            "at": "2026-10-28T12:00:00+00:00",
+            "project": "alpha",
+            "dispatched": False,
+        }
     ]
 
 
@@ -94,6 +106,35 @@ def test_collect_once_reports_the_config_dirs_sessions(tmp_path, monkeypatch):
     assert snapshot["host"] == "desk"
     assert snapshot["sessions"][0]["session_id"] == "s1"
     assert snapshot["sessions"][0]["project"] == tmp_path.name
+
+
+def test_a_session_a_program_opened_is_not_reported(tmp_path, monkeypatch):
+    (tmp_path / "sessions").mkdir()
+    for pid, session_id in ((1, "fixer"), (2, "mine")):
+        (tmp_path / "sessions" / f"{pid}.json").write_text(
+            json.dumps(
+                {"pid": pid, "sessionId": session_id, "cwd": str(tmp_path), "status": "busy"}
+            )
+        )
+    history(
+        tmp_path,
+        {
+            "display": "You are a fixer session, dispatched by the fix pass.",
+            "timestamp": 1_000,
+            "project": "/code/devkit",
+            "sessionId": "fixer",
+        },
+        {"display": "go", "timestamp": 2_000, "project": "/code/devkit", "sessionId": "mine"},
+    )
+    monkeypatch.setattr("productivity_tracker.sessions.is_alive", lambda pid, start: True)
+    client = FakeClient()
+
+    assert collect_once(settings(tmp_path), client, "desk", prompt_feed(settings(tmp_path))) == 1
+
+    [snapshot] = client.posted
+    assert [s["session_id"] for s in snapshot["sessions"]] == ["mine"]
+    # The fixer's brief still goes up, flagged: that is what corrects an earlier count.
+    assert [p["dispatched"] for p in snapshot["prompts"]] == [True, False]
 
 
 def test_collect_once_sends_each_prompt_once(tmp_path):
@@ -158,6 +199,69 @@ class Stop(Exception):
     pass
 
 
+def test_a_window_that_comes_up_at_once_takes_one_attempt():
+    tried: list[int] = []
+    outcome = focus_with_retries(
+        42, lambda pid: tried.append(pid) or True, lambda s: pytest.fail("slept")
+    )
+    assert outcome is True
+    assert tried == [42]
+
+
+def test_a_desktop_still_reconnecting_is_tried_again():
+    answers = iter([False, False, True])
+    naps: list[float] = []
+    assert focus_with_retries(42, lambda pid: next(answers), naps.append) is True
+    assert len(naps) == 2
+
+
+def test_a_session_that_never_comes_up_gives_up_and_says_so(caplog):
+    tried: list[int] = []
+
+    def never(pid: int) -> bool:
+        tried.append(pid)
+        return False
+
+    assert focus_with_retries(42, never, lambda s: None) is False
+    assert len(tried) == FOCUS_ATTEMPTS
+    assert "no window could be raised for pid 42" in caplog.text
+
+
+class Clicks:
+    def __init__(self, *answers) -> None:
+        self.answers = list(answers)
+        self.hosts: list[str] = []
+
+    def next_focus(self, host):
+        self.hosts.append(host)
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def test_a_click_is_carried_out():
+    done: list[int] = []
+    client = Clicks(42)
+    serve_focus_once(client, "desk", done.append)
+    assert client.hosts == ["desk"]
+    assert done == [42]
+
+
+def test_a_wait_that_ended_with_no_click_does_nothing():
+    serve_focus_once(Clicks(None), "desk", lambda pid: pytest.fail("focused"))
+
+
+def test_serve_focus_outlives_an_unreachable_server(monkeypatch):
+    naps: list[float] = []
+    monkeypatch.setattr(collector.time, "sleep", naps.append)
+
+    with pytest.raises(Stop):
+        serve_focus(Clicks(OSError("refused"), None, Stop()), "desk", 3.0)
+
+    assert naps == [3.0]
+
+
 def test_main_keeps_reporting_and_logs_an_outage_once(tmp_path, monkeypatch, caplog):
     outcomes = iter([None, OSError("refused"), OSError("refused"), None])
 
@@ -180,10 +284,21 @@ def test_main_keeps_reporting_and_logs_an_outage_once(tmp_path, monkeypatch, cap
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(collector, "TrackerClient", Client)
     monkeypatch.setattr(collector.time, "sleep", sleep)
+    threads: list[tuple] = []
+
+    class Thread:
+        def __init__(self, target, args, daemon):
+            threads.append((target, daemon))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(collector.threading, "Thread", Thread)
 
     with pytest.raises(Stop):
         collector.main()
 
+    assert threads == [(serve_focus, True)]
     messages = [r.getMessage() for r in caplog.records]
     assert sum("cannot reach" in m for m in messages) == 1
     assert any("reachable again" in m for m in messages)

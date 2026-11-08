@@ -6,7 +6,7 @@ drawing: which rows are built in which colours, and what a click or a right-clic
 
 import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -58,7 +58,26 @@ class Widget:
         return lambda *args, **kwargs: 0
 
 
-FAKE_TK = SimpleNamespace(Tk=Widget, Frame=Widget, Label=Widget, Event=object, Misc=Widget)
+class Menu(Widget):
+    opened: ClassVar[list["Menu"]] = []
+
+    def __init__(self, parent: Widget, **options: Any) -> None:
+        super().__init__(parent, **options)
+        self.commands: dict[str, Any] = {}
+        self.at: tuple[int, int] | None = None
+        Menu.opened.append(self)
+
+    def add_command(self, label: str, command: Any) -> None:
+        self.commands[label] = command
+
+    def tk_popup(self, x: int, y: int) -> None:
+        self.at = (x, y)
+
+
+FAKE_TK = SimpleNamespace(
+    Tk=Widget, Frame=Widget, Label=Widget, Menu=Menu, Event=object, Misc=Widget
+)
+CLICK_AT = SimpleNamespace(x_root=300, y_root=40)
 
 
 class Threads:
@@ -74,6 +93,9 @@ class Client:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.toggled: list[tuple[int, bool]] = []
+        self.added: list[str] = []
+        self.removed: list[int] = []
+        self.focused: list[tuple[str, int]] = []
 
     def state(self) -> dict:
         if self.fail:
@@ -86,13 +108,35 @@ class Client:
         self.toggled.append((task_id, active))
         return {}
 
+    def add_task(self, name: str) -> dict:
+        if self.fail:
+            raise OSError("unreachable")
+        self.added.append(name)
+        return {}
+
+    def remove_task(self, task_id: int) -> None:
+        if self.fail:
+            raise OSError("unreachable")
+        self.removed.append(task_id)
+
+    def request_focus(self, host: str, pid: int) -> None:
+        if self.fail:
+            raise OSError("unreachable")
+        self.focused.append((host, pid))
+
 
 @pytest.fixture
 def threads(monkeypatch) -> Threads:
     threads = Threads()
+    Menu.opened = []
     monkeypatch.setattr(overlay, "tk", FAKE_TK)
     monkeypatch.setattr(overlay, "threading", SimpleNamespace(Thread=threads))
     return threads
+
+
+def run_last(threads: Threads) -> None:
+    target, args = threads.started[-1]
+    target(*args)
 
 
 # Unannotated, like the tests: the stand-ins are Tk and a TrackerClient only by duck type.
@@ -182,9 +226,12 @@ def test_offline_is_shown_in_the_header_and_keeps_the_rows(threads):
 
 def test_clicking_a_row_focuses_its_next_session(threads, monkeypatch):
     focused: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        overlay, "focus_session", lambda s, host: focused.append((s["session_id"], host))
-    )
+
+    def focus(session, host, request, targets):
+        focused.append((session["session_id"], host))
+        return "window"
+
+    monkeypatch.setattr(overlay, "focus_session", focus)
     rows = shown(make(Client()), STATE)
 
     rows[0].bindings["<Button-1>"](None)
@@ -194,29 +241,156 @@ def test_clicking_a_row_focuses_its_next_session(threads, monkeypatch):
 
 
 def test_clicking_a_row_without_sessions_does_nothing(threads, monkeypatch):
-    monkeypatch.setattr(overlay, "focus_session", lambda s, host: pytest.fail("focused"))
+    monkeypatch.setattr(overlay, "focus_session", lambda *a: pytest.fail("focused"))
     rows = shown(make(Client()), STATE)
     rows[2].bindings["<Button-1>"](None)
 
 
-def test_right_click_greys_the_row_and_tells_the_server(threads):
+def test_a_click_on_another_pc_reaches_the_server_off_the_ui_thread(threads, monkeypatch):
+    def focus(session, host, request, targets):
+        request("elsewhere", 7)
+        return "remote"
+
+    monkeypatch.setattr(overlay, "focus_session", focus)
     client = Client()
-    win = make(client)
+    rows = shown(make(client), STATE)
+
+    rows[0].bindings["<Button-1>"](None)
+
+    assert client.focused == []
+    run_last(threads)
+    assert client.focused == [("elsewhere", 7)]
+
+
+def test_the_rdp_targets_reach_the_click(threads, monkeypatch):
+    seen: list = []
+
+    def focus(session, host, request, targets):
+        seen.append(targets)
+        return "window"
+
+    monkeypatch.setattr(overlay, "focus_session", focus)
+    win = OverlayWindow(Widget(), Client(), OverlayModel(), "desk", 1.0, {"desk": "10.0.0.1"})
     rows = shown(win, STATE)
 
-    rows[1].bindings["<Button-3>"](None)
+    rows[0].bindings["<Button-1>"](None)
+
+    assert seen == [{"desk": "10.0.0.1"}]
+
+
+def test_a_session_with_no_window_says_so_and_the_title_comes_back(threads, monkeypatch):
+    monkeypatch.setattr(overlay, "focus_session", lambda *a: "none")
+    win = make(Client())
+    rows = shown(win, STATE)
+
+    rows[0].bindings["<Button-1>"](None)
+
+    assert win.title.options["text"] == "no terminal window found"
+    win._show_title()
+    assert win.title.options["text"] == "Agents"
+
+
+def failed(threads, caplog, send) -> str:
+    """What the log says when `send`, given a client that cannot reach the server, runs."""
+    win = make(Client(fail=True))
+    send(win)
+    with caplog.at_level(logging.WARNING):
+        run_last(threads)
+    return caplog.text
+
+
+def test_a_failed_focus_is_logged(threads, caplog):
+    text = failed(threads, caplog, lambda win: win._request_focus("elsewhere", 7))
+    assert "request_focus('elsewhere', 7) failed" in text
+
+
+def open_menu(rows, index: int) -> Menu:
+    rows[index].bindings["<Button-3>"](CLICK_AT)
+    return Menu.opened[-1]
+
+
+def test_right_click_opens_the_rows_menu_where_you_clicked(threads):
+    menu = open_menu(shown(make(Client()), STATE), 1)
+
+    assert menu.at == (300, 40)
+    assert list(menu.commands) == ["Set inactive", "Remove from list"]
+
+
+def test_an_inactive_row_offers_to_come_back(threads):
+    menu = open_menu(shown(make(Client()), STATE), 3)
+    assert "Set active" in menu.commands
+
+
+def test_a_menu_for_a_row_that_just_went_opens_nothing(threads):
+    win = make(Client())
+    shown(win, STATE)
+    win.on_menu(999, CLICK_AT)
+    assert Menu.opened == []
+
+
+def test_set_inactive_greys_the_row_and_tells_the_server(threads):
+    client = Client()
+    win = make(client)
+    menu = open_menu(shown(win, STATE), 1)
+
+    menu.commands["Set inactive"]()
 
     assert win.rows.winfo_children()[1].children[0].options["bg"] == ROW_BG
-    target, args = threads.started[-1]
-    target(*args)
+    run_last(threads)
     assert client.toggled == [(2, False)]
 
 
+def test_remove_drops_the_row_at_once_and_tells_the_server(threads):
+    client = Client()
+    win = make(client)
+    menu = open_menu(shown(win, STATE), 1)
+
+    menu.commands["Remove from list"]()
+
+    names = [row.children[1].options["text"] for row in win.rows.winfo_children()]
+    assert names == ["alpha", "gamma", "delta"]
+    run_last(threads)
+    assert client.removed == [2]
+
+
+def test_a_failed_remove_is_logged(threads, caplog):
+    text = failed(threads, caplog, lambda win: win._send(win.client.remove_task, 2))
+    assert "remove_task(2,) failed" in text
+
+
+def add_row(monkeypatch, win, answer) -> None:
+    monkeypatch.setattr(overlay.simpledialog, "askstring", lambda *a, **k: answer)
+    win.on_add()
+
+
+def test_the_header_plus_adds_a_row(threads, monkeypatch):
+    client = Client()
+    win = make(client)
+
+    add_row(monkeypatch, win, "  itopia ")
+
+    run_last(threads)
+    assert client.added == ["itopia"]
+
+
+@pytest.mark.parametrize("answer", [None, "", "   "])
+def test_a_cancelled_or_blank_add_does_nothing(threads, monkeypatch, answer):
+    win = make(Client())
+    before = len(threads.started)
+
+    add_row(monkeypatch, win, answer)
+
+    assert len(threads.started) == before
+
+
+def test_a_failed_add_is_logged(threads, caplog):
+    text = failed(threads, caplog, lambda win: win._send(win.client.add_task, "itopia"))
+    assert "add_task('itopia',) failed" in text
+
+
 def test_a_failed_toggle_is_logged(threads, caplog):
-    win = make(Client(fail=True))
-    with caplog.at_level(logging.WARNING):
-        win._send_toggle(2, False)
-    assert "could not set task 2" in caplog.text
+    text = failed(threads, caplog, lambda win: win._send(win.client.set_active, 2, False))
+    assert "set_active(2, False) failed" in text
 
 
 def test_hover_shades_the_whole_row(threads):

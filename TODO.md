@@ -17,6 +17,12 @@ because guessing them wrong is worse than leaving them blank.
 ## Next
 
 - [ ] Start `pt-collector` at login on every PC (Task Scheduler or the Startup folder)
+- [ ] itopia: its row exists but stays grey until a collector reports. itopia is off the
+      tailnet, so it needs a route to the server first; then `TRACKER_TASK=itopia` there
+- [ ] Codex sessions: the collector reads Claude Code's files only. Codex keeps no live
+      status file, so this means a process scan plus its rollout log, on a real Codex CLI
+- [ ] A click through two Remote Desktop hops (the laptop, this PC, itopia): the overlay
+      raises one window only, and itopia's sits inside this PC's
 - [ ] Idle time per project: busy and waiting time are now recorded per day across all
       tasks (`daily_activity`); split them by task to report where agents sat idle
 - [ ] Gamification ideas not built yet: a daily prompt goal with a progress bar;

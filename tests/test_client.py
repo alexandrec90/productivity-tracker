@@ -18,18 +18,19 @@ class Recorder(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length)) if length else None
         Recorder.calls.append((self.command, self.path, self.headers.get("Authorization"), body))
-        if self.command == "POST":
+        if self.command == "DELETE" or (self.command == "POST" and self.path != "/tasks"):
             self.send_response(204)
             self.end_headers()
             return
-        payload = json.dumps({"ok": True}).encode()
+        answer = {"pid": 42} if self.path.startswith("/focus") else {"ok": True}
+        payload = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
-    do_GET = do_POST = do_PUT = _handle
+    do_GET = do_POST = do_PUT = do_DELETE = _handle
 
     def log_message(self, *args: object) -> None:
         pass
@@ -58,6 +59,44 @@ def test_the_client_speaks_the_api_with_its_token(server):
         ("GET", "/state", "Bearer t0k", None),
         ("PUT", "/tasks/7/active", "Bearer t0k", {"active": False}),
     ]
+
+
+def test_the_list_is_edited_over_the_api(server):
+    client = TrackerClient(server)
+
+    assert client.add_task("itopia") == {"ok": True}
+    client.remove_task(7)
+
+    assert Recorder.calls == [
+        ("POST", "/tasks", None, {"name": "itopia"}),
+        ("DELETE", "/tasks/7", None, None),
+    ]
+
+
+def test_a_click_goes_up_and_comes_down_to_the_collector(server):
+    client = TrackerClient(server)
+
+    client.request_focus("DESKTOP-B9FC8VP", 42)
+    assert client.next_focus("DESKTOP-B9FC8VP", wait=20) == 42
+
+    assert Recorder.calls == [
+        ("POST", "/focus", None, {"host": "DESKTOP-B9FC8VP", "pid": 42}),
+        ("GET", "/focus/DESKTOP-B9FC8VP?wait=20", None, None),
+    ]
+
+
+def test_waiting_for_a_click_outlasts_the_client_s_usual_timeout(monkeypatch):
+    client = TrackerClient("http://server", timeout=5.0)
+    seen: list[float | None] = []
+
+    def request(method, path, payload=None, timeout=None):
+        seen.append(timeout)
+        return {"pid": None}
+
+    monkeypatch.setattr(client, "request", request)
+
+    assert client.next_focus("a host", wait=20) is None
+    assert seen == [25.0]
 
 
 def test_no_token_sends_no_authorization_header(server):

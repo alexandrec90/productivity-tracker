@@ -5,8 +5,9 @@ Run it on the PC you sit at (the laptop):
 
     pt-overlay              # or: pythonw -m productivity_tracker.overlay
 
-Left-click a row to focus one of its sessions; click again for the next one. Right-click
-toggles the task between active and inactive. Drag the header to move it.
+Left-click a row to focus one of its sessions; click again for the next one. Right-click a
+row for its menu: set it active or inactive, or remove it. The header's plus adds a row.
+Drag the header to move it.
 """
 
 import logging
@@ -16,8 +17,9 @@ import sys
 import threading
 import time
 import tkinter as tk
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from tkinter import simpledialog
 from typing import Any
 
 from productivity_tracker.client import TrackerClient
@@ -42,6 +44,7 @@ GOLD = PALETTE[Color.YELLOW]
 FONT = ("Segoe UI", 10)
 SMALL = ("Segoe UI", 9)
 SMALL_BOLD = ("Segoe UI", 9, "bold")
+NOTICE_MILLISECONDS = 4000
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,11 @@ class OverlayModel:
                 return active
         return None
 
+    def remove(self, task_id: int) -> None:
+        """Drop a row locally, so it goes at once; the server has the last word on the next
+        poll, as for `toggle`."""
+        self.tasks = [t for t in self.tasks if t["id"] != task_id]
+
 
 class OverlayWindow:
     def __init__(
@@ -176,12 +184,14 @@ class OverlayWindow:
         model: OverlayModel,
         local_host: str,
         poll_seconds: float,
+        rdp_targets: Mapping[str, str] | None = None,
     ) -> None:
         self.root = root
         self.client = client
         self.model = model
         self.local_host = local_host
         self.poll_seconds = poll_seconds
+        self.rdp_targets = rdp_targets
         self.states: queue.Queue[Mapping[str, Any] | None] = queue.Queue()
         self._signature: object = None
         self._board: Scoreboard | None = None
@@ -201,6 +211,9 @@ class OverlayWindow:
         close = tk.Label(header, text="x", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda _e: root.destroy())
+        add = tk.Label(header, text="+", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
+        add.pack(side="right")
+        add.bind("<Button-1>", lambda _e: self.on_add())
         for widget in (header, self.title):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
@@ -256,11 +269,18 @@ class OverlayWindow:
         if not self._placed:
             self._place_top_right()
 
-    def _render_rows(self, rows: list[Row]) -> None:
+    def _show_title(self) -> None:
         self.title.configure(
             text="Agents" if self.model.online else "Agents (offline)",
             fg=MUTED if self.model.online else PALETTE[Color.RED],
         )
+
+    def _notice(self, text: str) -> None:
+        self.title.configure(text=text, fg=PALETTE[Color.RED])
+        self.root.after(NOTICE_MILLISECONDS, self._show_title)
+
+    def _render_rows(self, rows: list[Row]) -> None:
+        self._show_title()
         for child in self.rows.winfo_children():
             child.destroy()
         if not rows:
@@ -331,8 +351,8 @@ class OverlayWindow:
         def click(_event: tk.Event) -> None:
             self.on_click(task_id)
 
-        def toggle(_event: tk.Event) -> None:
-            self.on_toggle(task_id)
+        def menu(event: tk.Event) -> None:
+            self.on_menu(task_id, event)
 
         def hover(_event: tk.Event) -> None:
             _shade(widgets, ROW_HOVER)
@@ -342,30 +362,65 @@ class OverlayWindow:
 
         for widget in widgets:
             widget.bind("<Button-1>", click)
-            widget.bind("<Button-3>", toggle)
+            widget.bind("<Button-3>", menu)
             widget.bind("<Enter>", hover)
             widget.bind("<Leave>", leave)
 
     def on_click(self, task_id: int) -> None:
         session = self.model.target_for_click(task_id)
-        if session is not None:
-            # Synchronously, while this process still holds the foreground the click gave
-            # it: Windows refuses SetForegroundWindow to a process that does not.
-            focus_session(session, self.local_host)
+        if session is None:
+            return
+        # Synchronously, while this process still holds the foreground the click gave it:
+        # Windows refuses SetForegroundWindow to a process that does not.
+        outcome = focus_session(session, self.local_host, self._request_focus, self.rdp_targets)
+        if outcome == "none":
+            self._notice("no terminal window found")
+
+    def _request_focus(self, host: str, pid: int) -> None:
+        self._send(self.client.request_focus, host, pid)
+
+    def _send(self, call: Callable[..., object], *args: object) -> None:
+        """A server call, off the UI thread. A failure is only logged: the next poll shows
+        the server's list, undoing whatever the click changed on screen."""
+
+        def send() -> None:
+            try:
+                call(*args)
+            except (OSError, ValueError) as exc:
+                log.warning("%s%r failed: %s", call.__name__, args, exc)
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def on_menu(self, task_id: int, event: tk.Event) -> None:
+        row = next((r for r in self.model.rows() if r.task_id == task_id), None)
+        if row is None:
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="Set inactive" if row.active else "Set active",
+            command=lambda: self.on_toggle(task_id),
+        )
+        menu.add_command(label="Remove from list", command=lambda: self.on_remove(task_id))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def on_toggle(self, task_id: int) -> None:
         active = self.model.toggle(task_id)
         if active is None:
             return
         self.render()
-        threading.Thread(target=self._send_toggle, args=(task_id, active), daemon=True).start()
+        self._send(self.client.set_active, task_id, active)
 
-    def _send_toggle(self, task_id: int, active: bool) -> None:
-        try:
-            self.client.set_active(task_id, active)
-        except (OSError, ValueError) as exc:
-            # The next poll shows the server's flag, undoing the local flip.
-            log.warning("could not set task %s active=%s: %s", task_id, active, exc)
+    def on_remove(self, task_id: int) -> None:
+        self.model.remove(task_id)
+        self.render()
+        self._send(self.client.remove_task, task_id)
+
+    def on_add(self) -> None:
+        name = simpledialog.askstring(
+            "Add a row", "Project folder, or a PC's TRACKER_TASK:", parent=self.root
+        )
+        if name and name.strip():
+            self._send(self.client.add_task, name.strip())
 
     def _place_top_right(self) -> None:
         self.root.update_idletasks()
@@ -409,6 +464,7 @@ def main() -> None:
         OverlayModel(),
         socket.gethostname(),
         settings.poll_interval_seconds,
+        settings.tracker_rdp_targets,
     )
     root.mainloop()
 
