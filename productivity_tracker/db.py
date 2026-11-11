@@ -1,9 +1,22 @@
-"""The tables: tasks (one per project, across every PC), hosts, the sessions each host last
-reported, and the history behind the scoreboard: prompts and daily agent activity."""
+"""The tables: tasks (the rows you listed, each a project or a whole PC), hosts, the sessions
+each host last reported, and the history behind the scoreboard: prompts and daily agent
+activity."""
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, func, text, true
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    false,
+    func,
+    text,
+    true,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -35,20 +48,23 @@ class AgentSession(Base):
         ForeignKey("hosts.name", ondelete="CASCADE"), primary_key=True
     )
     session_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    # None: its project is not on the list.
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), index=True
+    )
     pid: Mapped[int] = mapped_column(Integer)
     cwd: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20))
     waiting_for: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str | None] = mapped_column(Text)
     kind: Mapped[str | None] = mapped_column(String(40))
-    remote_session_id: Mapped[str | None] = mapped_column(String(100))
     status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Prompt(Base):
-    """A prompt you typed, by when and where: never what. Kept by project name rather than
-    task, so a project prompted before the collector ever saw it run creates no row."""
+    """A prompt, by when and where: never what. Kept by project name rather than task, so
+    the count on a row does not depend on when the row was added. `dispatched` marks one a
+    program sent, kept but not counted: see `prompts.py`."""
 
     __tablename__ = "prompts"
 
@@ -56,6 +72,7 @@ class Prompt(Base):
     session_id: Mapped[str] = mapped_column(String(100), primary_key=True)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, index=True)
     project: Mapped[str] = mapped_column(String(200))
+    dispatched: Mapped[bool] = mapped_column(server_default=false())
 
 
 class DailyActivity(Base):

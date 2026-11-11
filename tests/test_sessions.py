@@ -40,7 +40,6 @@ def test_parse_session_reads_a_claude_code_session_file():
     assert session.pid == 2916
     assert session.status == "waiting"
     assert session.waiting_for == "input needed"
-    assert session.remote_session_id == "session_01VdrPkCGBeAXRVw7WvysPBX"
     assert session.kind == "interactive"
     assert session.status_updated_at is not None
     assert session.status_updated_at.startswith("2026-")
@@ -61,16 +60,23 @@ def test_parse_session_reads_an_unknown_status_as_idle():
         {k: v for k, v in RAW.items() if k != "sessionId"},
         {k: v for k, v in RAW.items() if k != "cwd"},
         {**RAW, "spare": True},
+        # What a `claude remote-control` server spawns: real file, no terminal, not yours.
+        {**RAW, "entrypoint": "sdk-cli"},
+        {**RAW, "entrypoint": "sdk-py"},
     ],
 )
 def test_parse_session_rejects_what_is_not_a_usable_session(raw):
     assert parse_session(raw) is None
 
 
+def test_a_session_you_opened_with_remote_control_on_is_still_yours():
+    # `bridgeSessionId` is on nearly every terminal session: /rc says nothing about who.
+    assert parse_session({**RAW, "entrypoint": "cli"}) is not None
+
+
 def test_optional_fields_may_be_missing():
     session = parse_session({"pid": 1, "sessionId": "x", "cwd": "/code/x"})
     assert session is not None
-    assert session.remote_session_id is None
     assert session.waiting_for is None
     assert session.status_updated_at is None
 

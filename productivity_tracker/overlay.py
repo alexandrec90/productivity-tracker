@@ -5,9 +5,10 @@ Run it on the PC you sit at (the laptop):
 
     python -m productivity_tracker.autostart start overlay
 
-Left-click a row to focus one of its sessions; click again for the next one. Right-click
-toggles the task between active and inactive. Drag the header to move it. The header's dash
-hides it to the tray icon, whose left-click brings it back.
+Left-click a row to focus one of its sessions; click again for the next one. Right-click a
+row for its menu: set it active or inactive, or remove it. The header's plus adds a row.
+Drag the header to move it. The header's dash hides it to the tray icon, whose left-click
+brings it back.
 """
 
 import logging
@@ -17,8 +18,9 @@ import sys
 import threading
 import time
 import tkinter as tk
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from tkinter import simpledialog
 from typing import Any
 
 from productivity_tracker.client import TrackerClient
@@ -44,6 +46,7 @@ GOLD = PALETTE[Color.YELLOW]
 FONT = ("Segoe UI", 10)
 SMALL = ("Segoe UI", 9)
 SMALL_BOLD = ("Segoe UI", 9, "bold")
+NOTICE_MILLISECONDS = 4000
 
 
 @dataclass(frozen=True)
@@ -169,28 +172,34 @@ class OverlayModel:
                 return active
         return None
 
+    def remove(self, task_id: int) -> None:
+        """Drop a row locally, so it goes at once; the server has the last word on the next
+        poll, as for `toggle`."""
+        self.tasks = [t for t in self.tasks if t["id"] != task_id]
+
 
 class OverlayWindow:
     def __init__(
         self,
         root: tk.Tk,
         client: TrackerClient,
-        model: OverlayModel,
         local_host: str,
         poll_seconds: float,
+        *,
+        rdp_targets: Mapping[str, str] | None = None,
         tray_commands: "queue.Queue[Command] | None" = None,
     ) -> None:
         self.root = root
         self.client = client
-        self.model = model
+        self.model = OverlayModel()
         self.local_host = local_host
         self.poll_seconds = poll_seconds
+        self.rdp_targets = rdp_targets
         self.states: queue.Queue[Mapping[str, Any] | None] = queue.Queue()
         self.commands: queue.Queue[Command] = tray_commands or queue.Queue()
         self.hidden = False
         self._signature: object = None
         self._board: Scoreboard | None = None
-        self._drag = (0, 0)
         self._placed = False
 
         root.title("Agents")
@@ -206,15 +215,16 @@ class OverlayWindow:
         close = tk.Label(header, text="x", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
         close.pack(side="right", padx=8)
         close.bind("<Button-1>", lambda _e: root.destroy())
+        add = tk.Label(header, text="+", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
+        add.pack(side="right")
+        add.bind("<Button-1>", lambda _e: self.on_add())
         # Only with a tray icon: the window has no taskbar button, so nothing else could
         # bring it back.
         if tray_commands is not None:
             hide = tk.Label(header, text="\N{EN DASH}", bg=BG, fg=MUTED, font=FONT, cursor="hand2")
             hide.pack(side="right")
             hide.bind("<Button-1>", lambda _e: self.toggle_visible())
-        for widget in (header, self.title):
-            widget.bind("<ButtonPress-1>", self._start_drag)
-            widget.bind("<B1-Motion>", self._on_drag)
+        _draggable(root, (header, self.title))
 
         # Column captions, laid out like a row so they line up with the numbers below.
         captions = tk.Frame(root, bg=BG)
@@ -281,11 +291,18 @@ class OverlayWindow:
         if not self._placed:
             self._place_top_right()
 
-    def _render_rows(self, rows: list[Row]) -> None:
+    def _show_title(self) -> None:
         self.title.configure(
             text="Agents" if self.model.online else "Agents (offline)",
             fg=MUTED if self.model.online else PALETTE[Color.RED],
         )
+
+    def _notice(self, text: str) -> None:
+        self.title.configure(text=text, fg=PALETTE[Color.RED])
+        self.root.after(NOTICE_MILLISECONDS, self._show_title)
+
+    def _render_rows(self, rows: list[Row]) -> None:
+        self._show_title()
         for child in self.rows.winfo_children():
             child.destroy()
         if not rows:
@@ -356,8 +373,8 @@ class OverlayWindow:
         def click(_event: tk.Event) -> None:
             self.on_click(task_id)
 
-        def toggle(_event: tk.Event) -> None:
-            self.on_toggle(task_id)
+        def menu(event: tk.Event) -> None:
+            self.on_menu(task_id, event)
 
         def hover(_event: tk.Event) -> None:
             _shade(widgets, ROW_HOVER)
@@ -367,30 +384,65 @@ class OverlayWindow:
 
         for widget in widgets:
             widget.bind("<Button-1>", click)
-            widget.bind("<Button-3>", toggle)
+            widget.bind("<Button-3>", menu)
             widget.bind("<Enter>", hover)
             widget.bind("<Leave>", leave)
 
     def on_click(self, task_id: int) -> None:
         session = self.model.target_for_click(task_id)
-        if session is not None:
-            # Synchronously, while this process still holds the foreground the click gave
-            # it: Windows refuses SetForegroundWindow to a process that does not.
-            focus_session(session, self.local_host)
+        if session is None:
+            return
+        # Synchronously, while this process still holds the foreground the click gave it:
+        # Windows refuses SetForegroundWindow to a process that does not.
+        outcome = focus_session(session, self.local_host, self._request_focus, self.rdp_targets)
+        if outcome == "none":
+            self._notice("no terminal window found")
+
+    def _request_focus(self, host: str, pid: int) -> None:
+        self._send(self.client.request_focus, host, pid)
+
+    def _send(self, call: Callable[..., object], *args: object) -> None:
+        """A server call, off the UI thread. A failure is only logged: the next poll shows
+        the server's list, undoing whatever the click changed on screen."""
+
+        def send() -> None:
+            try:
+                call(*args)
+            except (OSError, ValueError) as exc:
+                log.warning("%s%r failed: %s", call.__name__, args, exc)
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def on_menu(self, task_id: int, event: tk.Event) -> None:
+        row = next((r for r in self.model.rows() if r.task_id == task_id), None)
+        if row is None:
+            return
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="Set inactive" if row.active else "Set active",
+            command=lambda: self.on_toggle(task_id),
+        )
+        menu.add_command(label="Remove from list", command=lambda: self.on_remove(task_id))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def on_toggle(self, task_id: int) -> None:
         active = self.model.toggle(task_id)
         if active is None:
             return
         self.render()
-        threading.Thread(target=self._send_toggle, args=(task_id, active), daemon=True).start()
+        self._send(self.client.set_active, task_id, active)
 
-    def _send_toggle(self, task_id: int, active: bool) -> None:
-        try:
-            self.client.set_active(task_id, active)
-        except (OSError, ValueError) as exc:
-            # The next poll shows the server's flag, undoing the local flip.
-            log.warning("could not set task %s active=%s: %s", task_id, active, exc)
+    def on_remove(self, task_id: int) -> None:
+        self.model.remove(task_id)
+        self.render()
+        self._send(self.client.remove_task, task_id)
+
+    def on_add(self) -> None:
+        name = simpledialog.askstring(
+            "Add a row", "Project folder, or a PC's TRACKER_TASK:", parent=self.root
+        )
+        if name and name.strip():
+            self._send(self.client.add_task, name.strip())
 
     def _place_top_right(self) -> None:
         self.root.update_idletasks()
@@ -398,12 +450,20 @@ class OverlayWindow:
         self.root.geometry(f"+{x}+48")
         self._placed = True
 
-    def _start_drag(self, event: tk.Event) -> None:
-        self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
 
-    def _on_drag(self, event: tk.Event) -> None:
-        dx, dy = self._drag
-        self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+def _draggable(root: tk.Tk, handles: tuple[tk.Misc, ...]) -> None:
+    """Pressing on any of `handles` and moving drags the whole window."""
+    grip = [0, 0]
+
+    def start(event: tk.Event) -> None:
+        grip[:] = [event.x_root - root.winfo_x(), event.y_root - root.winfo_y()]
+
+    def move(event: tk.Event) -> None:
+        root.geometry(f"+{event.x_root - grip[0]}+{event.y_root - grip[1]}")
+
+    for handle in handles:
+        handle.bind("<ButtonPress-1>", start)
+        handle.bind("<B1-Motion>", move)
 
 
 def _shade(widgets: tuple[tk.Misc, ...], color: str) -> None:
@@ -433,10 +493,10 @@ def main() -> None:
     OverlayWindow(
         root,
         TrackerClient(settings.tracker_url, settings.tracker_token),
-        OverlayModel(),
         socket.gethostname(),
         settings.poll_interval_seconds,
-        commands if tray is not None else None,
+        rdp_targets=settings.tracker_rdp_targets,
+        tray_commands=commands if tray is not None else None,
     )
     root.mainloop()
     if tray is not None:

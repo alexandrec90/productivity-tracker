@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # lights a project row. Unset, each session's task is its project.
     tracker_task: str = ""
 
+    # Overlay: what you connect to in Remote Desktop, by host, for any PC whose address there
+    # is not its own name (an IP, say): the window to look for and what to open if there is
+    # none. JSON, e.g. {"DESKTOP-B9FC8VP": "100.76.121.58"}.
+    tracker_rdp_targets: dict[str, str] = {}
+
     collect_interval_seconds: float = 3.0
     poll_interval_seconds: float = 2.0
     # Claude Code's config directory, holding `sessions/<pid>.json`. Unset means the one

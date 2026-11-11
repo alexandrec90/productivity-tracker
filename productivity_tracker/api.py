@@ -6,14 +6,26 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from productivity_tracker import store
+from productivity_tracker.broker import FocusBroker
 from productivity_tracker.config import Settings
-from productivity_tracker.db import make_engine
-from productivity_tracker.schemas import ActiveIn, SnapshotIn, StateOut, TaskOut
+from productivity_tracker.db import Task, make_engine
+from productivity_tracker.schemas import (
+    ActiveIn,
+    FocusIn,
+    FocusOut,
+    SnapshotIn,
+    StateOut,
+    TaskIn,
+    TaskOut,
+)
 from productivity_tracker.status import task_color
+
+# Under a proxy's idle timeout, and under the client's own (see `next_focus`).
+MAX_FOCUS_WAIT_SECONDS = 30.0
 
 
 def token_matches(expected: str, authorization: str | None) -> bool:
@@ -22,6 +34,17 @@ def token_matches(expected: str, authorization: str | None) -> bool:
         return True
     scheme, _, supplied = (authorization or "").partition(" ")
     return scheme.lower() == "bearer" and secrets.compare_digest(supplied, expected)
+
+
+def task_out(task: Task) -> TaskOut:
+    # The overlay re-reads /state for the sessions; this answer only confirms the row.
+    return TaskOut(
+        id=task.id,
+        name=task.name,
+        active=task.active,
+        color=task_color(task.active, []),
+        sessions=[],
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -46,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Db = Annotated[AsyncSession, Depends(database)]
     stale_after = timedelta(seconds=settings.stale_after_seconds)
+    broker = FocusBroker()
     app = FastAPI(title="Productivity Tracker", lifespan=lifespan)
 
     @app.get("/healthz")
@@ -67,18 +91,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_state(db: Db) -> StateOut:
         return await store.load_state(db, datetime.now(UTC), stale_after, settings.tracker_timezone)
 
+    @app.post("/tasks", status_code=201, dependencies=[Depends(authorized)])
+    async def post_task(body: TaskIn, db: Db) -> TaskOut:
+        return task_out(await store.add_task(db, body.name))
+
+    @app.delete("/tasks/{task_id}", status_code=204, dependencies=[Depends(authorized)])
+    async def delete_task(task_id: int, db: Db) -> Response:
+        if not await store.remove_task(db, task_id):
+            raise HTTPException(status_code=404, detail=f"no task {task_id}")
+        return Response(status_code=204)
+
     @app.put("/tasks/{task_id}/active", dependencies=[Depends(authorized)])
     async def put_active(task_id: int, body: ActiveIn, db: Db) -> TaskOut:
         task = await store.set_active(db, task_id, body.active)
         if task is None:
             raise HTTPException(status_code=404, detail=f"no task {task_id}")
-        # The overlay re-reads /state for the sessions; this answer only confirms the flag.
-        return TaskOut(
-            id=task.id,
-            name=task.name,
-            active=task.active,
-            color=task_color(task.active, []),
-            sessions=[],
-        )
+        return task_out(task)
+
+    @app.post("/focus", status_code=204, dependencies=[Depends(authorized)])
+    async def post_focus(body: FocusIn) -> Response:
+        broker.put(body.host, body.pid)
+        return Response(status_code=204)
+
+    # No database here: a collector sits on this request all day.
+    @app.get("/focus/{host}", dependencies=[Depends(authorized)])
+    async def get_focus(
+        host: str, wait: Annotated[float, Query(ge=0, le=MAX_FOCUS_WAIT_SECONDS)] = 20.0
+    ) -> FocusOut:
+        return FocusOut(pid=await broker.take(host, wait))
 
     return app

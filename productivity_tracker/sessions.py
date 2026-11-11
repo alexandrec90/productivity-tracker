@@ -8,6 +8,10 @@ files is the whole collector: no hook, no wrapper around `claude`.
 A file outlives a process that crashed, so each one is checked against the process table:
 the pid must be alive, and on Windows its creation time must match the file's `procStart`,
 or a recycled pid would resurrect a dead session.
+
+Only sessions you opened count. A `claude remote-control` server spawns its sessions headless
+through the SDK, and so does `claude -p`: such a file says `"entrypoint": "sdk-cli"`, and has
+no terminal to focus.
 """
 
 import json
@@ -36,9 +40,6 @@ class LiveSession:
     waiting_for: str | None
     name: str | None
     kind: str | None
-    # The Remote Control session (`session_...`), when the session has one: what lets a
-    # session on another PC be opened at claude.ai/code/<id>.
-    remote_session_id: str | None
     status_updated_at: str | None
 
 
@@ -107,9 +108,11 @@ def _str_or_none(value: object) -> str | None:
 
 
 def parse_session(raw: object) -> LiveSession | None:
-    """One session file's JSON, or None for one that is not a usable session: malformed, or
-    a pre-warmed spare process no one has given a task yet."""
+    """One session file's JSON, or None for one that is not a usable session: malformed, a
+    pre-warmed spare process no one has given a task yet, or a headless one you did not open."""
     if not isinstance(raw, dict) or raw.get("spare") is True:
+        return None
+    if str(raw.get("entrypoint", "")).startswith("sdk"):
         return None
     pid, session_id, cwd = raw.get("pid"), raw.get("sessionId"), raw.get("cwd")
     if not isinstance(pid, int) or not isinstance(session_id, str) or not isinstance(cwd, str):
@@ -123,7 +126,6 @@ def parse_session(raw: object) -> LiveSession | None:
         waiting_for=_str_or_none(raw.get("waitingFor")),
         name=_str_or_none(raw.get("name")),
         kind=_str_or_none(raw.get("kind")),
-        remote_session_id=_str_or_none(raw.get("bridgeSessionId")),
         status_updated_at=_iso_from_ms(raw.get("statusUpdatedAt")),
     )
 

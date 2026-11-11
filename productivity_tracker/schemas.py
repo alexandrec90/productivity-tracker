@@ -1,9 +1,9 @@
 """The API's request and response bodies."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from productivity_tracker.status import Color
 
@@ -19,7 +19,6 @@ class SessionIn(BaseModel):
     waiting_for: str | None = None
     name: str | None = None
     kind: str | None = Field(default=None, max_length=40)
-    remote_session_id: str | None = Field(default=None, max_length=100)
     status_updated_at: datetime | None = None
 
 
@@ -28,6 +27,8 @@ class PromptIn(BaseModel):
     session_id: str = Field(max_length=100)
     at: datetime
     project: str = Field(min_length=1, max_length=200)
+    # Sent to the session by a program, not typed by you: kept, but it counts for nothing.
+    dispatched: bool = False
 
 
 class SnapshotIn(BaseModel):
@@ -46,8 +47,11 @@ class SessionOut(BaseModel):
     waiting_for: str | None
     name: str | None
     kind: str | None
-    remote_session_id: str | None
     status_updated_at: datetime | None
+
+
+class TaskIn(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
 class TaskOut(BaseModel):
@@ -94,3 +98,13 @@ class StateOut(BaseModel):
 
 class ActiveIn(BaseModel):
     active: bool
+
+
+class FocusIn(BaseModel):
+    host: str = Field(min_length=1, max_length=200)
+    pid: int
+
+
+class FocusOut(BaseModel):
+    # None: nothing was clicked while the collector waited.
+    pid: int | None

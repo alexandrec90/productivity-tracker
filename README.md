@@ -13,19 +13,39 @@ template. The agent harness in `scripts/hooks/` is vendored from there — see
  ─────────                         ───────────────              ──────────
  pt-collector  ── POST /snapshots ─▶  API + Postgres  ◀─ GET /state ──  pt-overlay
  reads ~/.claude/sessions/*.json      (python -m productivity_tracker)  always-on-top rows
+ raises terminals ◀─ GET /focus/<host> ─┘   ▲
+                                            └─ POST /focus ── a click on another PC's session
 ```
 
 - **Collector** (`pt-collector`, every PC): every 3 s it reads the session files Claude
   Code keeps in `~/.claude/sessions/<pid>.json`, one per running agent, whose `status` is
   `busy`, `waiting` (a question, a permission prompt, a dialog) or `idle`. It checks each
   pid is still the process that wrote the file, folds worktrees into their project, and
-  posts the PC's whole list. It needs no hook and no wrapper around `claude`.
-- **Server** (`docker compose up -d`): keeps one row per **task** and each PC's latest
+  posts the PC's whole list. It needs no hook and no wrapper around `claude`. It also waits
+  for clicks on its PC's sessions, so it has to run inside your desktop session (at login,
+  not as a service).
+- **Server** (`docker compose up -d`): keeps your list of **tasks** and each PC's latest
   sessions. A task is either a **project** (`roguelike`): every session in that repo or
   its worktrees, on any PC. Or it is a **whole PC** (`itopia`): every session on a PC
   whose collector has `TRACKER_TASK=itopia`; those sessions count toward that row only,
   never their project's. A PC that has not reported for 30 s stops counting.
 - **Overlay** (`pt-overlay`, the laptop): one row per task.
+
+**The list is yours.** A row exists because you added it: a session in a project with no
+row shows nowhere, though it still counts toward the scoreboard. The header's **+** adds a
+row: the project's folder name, or a PC's `TRACKER_TASK`. Right-click a row to remove it.
+
+**What counts.** Sessions and prompts you started, nothing else:
+
+| Left out | How it is known |
+| --- | --- |
+| a session a `claude remote-control` server spawned, or `claude -p` | its session file says `"entrypoint": "sdk-…"` |
+| a session the fix pass dispatched, and its brief | its prompt opens "You are a fixer session" |
+
+A dispatched prompt looks typed to Claude Code, so only its text gives it away; the collector
+reads that opening, and sends the verdict, never the text. Prompts already counted correct
+themselves the next time a collector restarts and resends its history. Agent time and the
+parallel peak cannot be corrected backwards: days before this change include such sessions.
 
 | Row | Meaning |
 | --- | --- |
@@ -35,10 +55,19 @@ template. The agent harness in `scripts/hooks/` is vendored from there — see
 | grey, no bar | the task is inactive |
 
 Left-click a row to focus a session: a yellow row cycles through the sessions asking,
-any other row through all of its sessions, working ones first. A session on the
-laptop raises its terminal window. A session on another PC opens its Remote Control page
-(`claude.ai/code/session_…`). Right-click toggles the task active or inactive. Drag the
-header to move it.
+any other row through all of its sessions, working ones first. Right-click for the row's
+menu: set it active or inactive, or remove it. Drag the header to move it.
+
+A session on the laptop raises its terminal on the session's own tab. A session on another
+PC takes two steps, because nothing on the laptop can reach inside a remote desktop: the
+overlay raises that PC's Remote Desktop window (opening one with `mstsc` if there is none),
+and the server passes the click to the PC's collector, which selects the tab and raises the
+terminal there. A click waits up to 30 s for a desktop that is still connecting.
+
+The window is the one titled with the PC's name, or the only Remote Desktop window open. If
+you connect by address and keep several open, say which is which in the laptop's `.env`:
+`TRACKER_RDP_TARGETS={"DESKTOP-B9FC8VP": "100.76.121.58"}`. Only `mstsc` windows are
+recognised, and two tabs with the same title cannot be told apart: the first one wins.
 
 The `–` in the header hides the overlay to its tray icon, near the clock (Windows may tuck
 it behind the `^`). Left-click the icon to show or hide it; right-click it for **Start at
@@ -60,7 +89,8 @@ A figure that beats its record turns gold with a star (the first day has no reco
 beat). The last line is how long agents sat waiting on you today: the number to keep low.
 
 Prompts come from Claude Code's `~/.claude/history.jsonl`; the collector sends only each
-prompt's time and project, never its text, and leaves out `/commands` and `!shell` lines.
+prompt's time, project and whether a program sent it, never its text, and leaves out
+`/commands` and `!shell` lines.
 On its first run it sends the whole file, so records and streaks start with your history.
 Agent time and parallel count from the day the collector starts. Days end at midnight in
 `TRACKER_TIMEZONE`.

@@ -50,44 +50,43 @@ async def ingest_snapshot(
     timezone: str = "UTC",
     stale_after: timedelta = DEFAULT_STALE,
 ) -> None:
-    """Replace everything known about the snapshot's host with it, creating a task for any
-    project seen for the first time; keep its new prompts; and add the time since the host's
-    last snapshot to today's agent activity."""
-    host, prompts = snapshot.host, snapshot.prompts
+    """Replace everything known about the snapshot's host with it; keep its new prompts; and
+    add the time since the host's last snapshot to today's agent activity. A session of a
+    project with no row is kept, on no task: the list is yours, so a project does not put
+    itself on it, and adding the row later picks its sessions up."""
+    host = snapshot.host
     busy, waiting = await _time_since_last_report(db, host, now, stale_after)
     # One row per session id: the last one in the snapshot wins.
     unique = list({s.session_id: s for s in snapshot.sessions}.values())
+    # Likewise per prompt: an upsert may not touch one row twice in a statement.
+    prompts = list({(p.session_id, p.at): p for p in snapshot.prompts}.values())
     await db.execute(
         insert(Host)
         .values(name=host, last_seen_at=now)
         .on_conflict_do_update(index_elements=[Host.name], set_={"last_seen_at": now})
     )
     names = {s.project for s in unique}
-    task_ids: dict[str, int] = {}
-    if names:
-        await db.execute(
-            insert(Task)
-            .values([{"name": n} for n in sorted(names)])
-            .on_conflict_do_nothing(index_elements=[Task.name])
-        )
-        rows = await db.execute(select(Task.name, Task.id).where(Task.name.in_(names)))
-        task_ids = {name: task_id for name, task_id in rows}
+    rows = await db.execute(select(Task.name, Task.id).where(Task.name.in_(names)))
+    task_ids: dict[str, int] = {name: task_id for name, task_id in rows}
     await db.execute(delete(AgentSession).where(AgentSession.host == host))
     db.add_all(
         AgentSession(
             host=host,
-            task_id=task_ids[s.project],
+            task_id=task_ids.get(s.project),
             **s.model_dump(exclude={"project"}),
         )
         for s in unique
     )
     if prompts:
         # A collector sends its whole history once, and again after a restart: a prompt the
-        # server already has is skipped, not counted twice.
+        # server already has is not counted twice, but takes on what the collector now knows
+        # about it, which is how prompts from before `dispatched` got sorted out.
+        added_prompts = insert(Prompt).values([{"host": host, **p.model_dump()} for p in prompts])
         await db.execute(
-            insert(Prompt)
-            .values([{"host": host, **p.model_dump()} for p in prompts])
-            .on_conflict_do_nothing()
+            added_prompts.on_conflict_do_update(
+                index_elements=[Prompt.host, Prompt.session_id, Prompt.at],
+                set_={"dispatched": added_prompts.excluded.dispatched},
+            )
         )
     peak = await db.scalar(
         select(func.count())
@@ -148,12 +147,17 @@ async def load_state(
     ).all()
     by_task: dict[int, list[AgentSession]] = defaultdict(list)
     for session in sessions:
-        by_task[session.task_id].append(session)
+        if session.task_id is not None:
+            by_task[session.task_id].append(session)
     today = (await db.execute(select(local_date(now, timezone)))).scalar_one()
     prompted = await db.execute(
         select(Prompt.project, func.count())
         # The range keeps the index in play; the day test is the exact one.
-        .where(Prompt.at >= now - timedelta(days=2), local_date(Prompt.at, timezone) == today)
+        .where(
+            Prompt.at >= now - timedelta(days=2),
+            local_date(Prompt.at, timezone) == today,
+            Prompt.dispatched.is_(False),
+        )
         .group_by(Prompt.project)
     )
     prompts_today: dict[str, int] = {project: count for project, count in prompted}
@@ -178,7 +182,8 @@ async def load_state(
 async def load_stats(db: AsyncSession, today: date, timezone: str) -> StatsOut:
     """Today's figures against the records of every day before it, and the prompt streak."""
     day = local_date(Prompt.at, timezone)
-    prompt_days = {d: n for d, n in await db.execute(select(day, func.count()).group_by(day))}
+    typed = select(day, func.count()).where(Prompt.dispatched.is_(False)).group_by(day)
+    prompt_days = {d: n for d, n in await db.execute(typed)}
     days = {d: DayStats(prompts=n) for d, n in prompt_days.items()}
     for activity in (await db.scalars(select(DailyActivity))).all():
         days[activity.day] = DayStats(
@@ -194,6 +199,27 @@ async def load_stats(db: AsyncSession, today: date, timezone: str) -> StatsOut:
         streak=current,
         best_streak=longest,
     )
+
+
+async def add_task(db: AsyncSession, name: str) -> Task:
+    """Put `name` on the list; adding a name already there changes nothing. Its sessions join
+    it on their PC's next report."""
+    await db.execute(
+        insert(Task).values(name=name).on_conflict_do_nothing(index_elements=[Task.name])
+    )
+    await db.commit()
+    return (await db.scalars(select(Task).where(Task.name == name))).one()
+
+
+async def remove_task(db: AsyncSession, task_id: int) -> bool:
+    """Take a row off the list. Its sessions and prompts stay: they count toward the
+    scoreboard, and adding the row back finds them."""
+    task = await db.get(Task, task_id)
+    if task is None:
+        return False
+    await db.delete(task)
+    await db.commit()
+    return True
 
 
 async def set_active(db: AsyncSession, task_id: int, active: bool) -> Task | None:

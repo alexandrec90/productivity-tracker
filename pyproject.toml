@@ -15,6 +15,8 @@ dependencies = [
   # The collector checks a session file's pid is still the process that wrote it, and
   # the overlay walks a session's parent processes to the window hosting it.
   "psutil>=6.0",
+  # Selects a session's Windows Terminal tab, through UI Automation.
+  "comtypes>=1.4; sys_platform == 'win32'",
   # The overlay's tray icon. Windows only: the server image and CI have no use for them.
   "pystray>=0.19; sys_platform == 'win32'",
   "pillow>=11; sys_platform == 'win32'",
