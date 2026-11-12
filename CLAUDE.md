@@ -71,6 +71,10 @@ here is a fork that will disagree with it the first time either is edited.
   touching the live one, and fails rather than skips without it.
 - The overlay window is tested through a stand-in for `tkinter`
   (`tests/test_overlay_window.py`). CI has no display, so do not reach for a real `Tk()`.
+- A test that needs this workstation (the Docker daemon, a Windows-only package) is marked
+  `local`: `addopts` deselects it, `python scripts/e2e.py` runs it. `tests/test_e2e_stack.py`
+  brings up its own compose project (`productivity-tracker-e2e`, free ports,
+  `tests/e2e-compose.yml`) and runs the real collector against it, never the live stack.
 
 ## Guardrails
 

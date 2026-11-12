@@ -77,6 +77,13 @@ repos:
         args: [--fix=lf] # matches .gitattributes' `eol=lf`
       - id: check-merge-conflict
       - id: check-yaml
+        exclude: &compose_overlays ^tests/e2e-compose\.yml$
+      # Compose overlays use compose's own tags (`!reset`, `!override`), which a safe
+      # loader has no constructor for. `--unsafe` still parses them, for syntax alone.
+      - id: check-yaml
+        name: check yaml (compose overlays, syntax only)
+        args: [--unsafe]
+        files: *compose_overlays
       - id: check-toml
       - id: check-json
         # .claude/settings.json is strict JSON; .vscode/tasks.json is JSONC and would fail.

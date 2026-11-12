@@ -137,8 +137,8 @@ def test_start_tray_without_pystray_is_none(monkeypatch, caplog):
     assert "no tray icon" in caplog.text
 
 
+@pytest.mark.local  # pillow is a Windows-only dependency, so CI has none to draw with.
 def test_the_icon_draws_a_row_per_colour():
-    pytest.importorskip("PIL", reason="pillow is a Windows-only dependency")
     image = icon_image(["#ff0000", "#00ff00", "#0000ff"])
 
     assert image.size == (tray.SIZE, tray.SIZE)
