@@ -1,0 +1,16 @@
+# Layered over `docker-compose.yml` by `tests/test_e2e_stack.py`, under a compose
+# project of its own (`productivity-tracker-e2e`), so the end-to-end tier builds and
+# runs the real image on a throwaway database without touching the live stack.
+#
+# `!reset` drops the checkout's `.env` from the app: the run must not depend on this
+# machine's token, timezone or task, and must work in a clone that has no `.env`.
+services:
+  app:
+    env_file: !reset []
+    environment:
+      TRACKER_TOKEN: e2e-token
+      TRACKER_TIMEZONE: UTC
+      STALE_AFTER_SECONDS: "120"
+    restart: "no"
+  db:
+    restart: "no"
